@@ -53,6 +53,8 @@ class MainActivity : Activity() {
     private var lanSnapshot = Telemetry.capture(JSONObject())
     private var lanFetchedAt = ""
     private var lanRawX10 = ""
+    private var lanFrames = emptyList<LanFrame>()
+    private var lanResultType = "brak"
     private var lanSteps = listOf<String>()
     private var lanStatus = "Nie testowano połączenia Wi-Fi"
     private var cloudChecks = mutableListOf<String>()
@@ -270,7 +272,7 @@ class MainActivity : Activity() {
         source = "brak"; fetchedAt = ""; rawX10 = ""
         luaSnapshot = Telemetry.capture(JSONObject()); luaFetchedAt = ""
         lanSnapshot = Telemetry.capture(JSONObject());lanFetchedAt = "";lanRawX10="";lanSteps=emptyList()
-        lanDiscoveries=emptyList();localPump=null;lanStatus="Nie testowano połączenia Wi-Fi"
+        lanDiscoveries=emptyList();localPump=null;lanStatus="Nie testowano połączenia Wi-Fi";lanFrames=emptyList();lanResultType="brak"
         cloudChecks.clear()
         lastCode = null; errorEndpoint = null; errorAt = ""; feedback = ""
         lastStatus = -60_000L; lastDiagnostic = -60_000L;lastWifiRead=-60_000L
@@ -660,12 +662,23 @@ class MainActivity : Activity() {
         }
         card(root){ c ->
             title(c,"Diagnostyka lokalna")
-            caption(c,"Odczytujemy X10 (sprężarka, wymienniki, woda), X0A (HMI) i X01 (status). Zapytania są wyłącznie odczytowe; brak sterowania urządzeniem.")
+            caption(c,"Najpierw X01 (działające podstawowe odczyty), następnie X10 (sprężarka i wymienniki) i X0A (HMI). Same odczyty, bez sterowania.")
             spacing(c,9)
             action(c,"Odczytaj parametry bezpośrednio",primary=true){ readLan() }
             if(lanSnapshot.fields.isNotEmpty()){
                 spacing(c,11)
+                label(c, "Źródło danych: $lanResultType · ${lanSnapshot.fields.size} pól", 13, ink, true)
+                if(lanResultType=="X01") caption(c,"X01 to dane stanu i nastaw, nie aktualna praca sprężarki. X10 nie odpowiedziało.")
                 lanSnapshot.fields.forEach{ f->fieldRow(c,f.recognizedLabel?:f.key,f.shownValue)}
+            }
+        }
+        if(lanFrames.isNotEmpty())card(root){ c ->
+            title(c,"Surowe odpowiedzi C3")
+            caption(c,"Zapisujemy maksymalnie 88 pierwszych bajtów każdej ramki. Usuwamy dalszą część, która może zawierać numer seryjny pompy.")
+            lanFrames.forEach { f ->
+                label(c,"${f.request} → 0x${f.messageType.toString(16)}/0x${f.subtype.toString(16)} · ${f.size} B · suma ${if(f.checksumOk) "OK" else "NOK"}",12,ink,true,5)
+                label(c,f.rawPrefixHex+(if(f.truncated)" [obcięto]" else ""),11,muted)
+                spacing(c,9)
             }
         }
         if(lanSteps.isNotEmpty())card(root){ c ->
@@ -689,9 +702,14 @@ class MainActivity : Activity() {
             WifiC3.poll(this,l,p.sn8,keys)
         },{result->
             lanSnapshot=Telemetry.capture(JSONObject(result.readings));lanRawX10=result.rawX10
+            lanFrames=result.frames;lanResultType=result.responseType
             lanFetchedAt=Instant.now().toString()
             lanSteps=result.steps
-            lanStatus=if(result.readings.isEmpty())"Połączono, brak potwierdzonych danych X10" else "Odebrano ${result.readings.size} parametrów z X10"
+            lanStatus=when(result.responseType) {
+                "X10" -> "Sukces: X10 — ${result.readings.size} parametrów (w tym praca urządzenia)"
+                "X01" -> "X01 działa: ${result.readings.size} pól podstawowych. X10 nadal bez pomiarów."
+                else -> "Połączono, lecz nie udało się zdekodować danych pompy"
+            }
             feedback=lanStatus;dashboard()
         },{e ->
             lanStatus="Błąd Wi-Fi: ${e.message?.take(150)?:e.javaClass.simpleName}"
@@ -715,7 +733,7 @@ class MainActivity : Activity() {
             caption(c,"Porównanie tylko rzeczywiście odebranych wartości. Znak — oznacza brak parametru, nie wartość 0.")
             fieldRow(c,"Chmura SmartHome", "${snapshot.fields.size} pól")
             fieldRow(c,"Chmura Lua serwisowa", "${luaSnapshot.fields.size} pól")
-            fieldRow(c,"Wi-Fi (X10)", "${lanSnapshot.fields.size} pól")
+            fieldRow(c,"Wi-Fi ($lanResultType)", "${lanSnapshot.fields.size} pól")
         }
         val mapped=listOf(
             Triple("Sprężarka – częstotliwość","comp_run_freq","compRunFreq"),
@@ -773,9 +791,9 @@ class MainActivity : Activity() {
             title(c, "Prywatność i odczyt")
             caption(c, "Zrzuty ekranu są dozwolone. Raport JSON nie zawiera danych logowania ani tokenów.")
             spacing(c, 6)
-            caption(c, "Nie uruchamiamy Home Assistant. Nie korzystamy z Modbus, LAN ani dodatkowych modułów. Brak zmiany nastaw pompy.")
+            caption(c, "Nie uruchamiamy Home Assistant ani Modbus. Lokalny odczyt korzysta wyłącznie z fabrycznego Wi-Fi. Bez zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.5.0 • Chmura + lokalne Wi-Fi")
+            caption(c, "Wersja 0.5.1 • Chmura + Wi-Fi · diagnostyka X01")
         }
     }
 
@@ -871,6 +889,14 @@ class MainActivity : Activity() {
             .put("luaUnitDiagnosticsFetchedAt", luaFetchedAt)
             .put("luaUnitDiagnosticsFields", luaSnapshot.fields.size)
             .put("wifi", org.json.JSONObject().put("receivedFields",lanSnapshot.fields.size)
+                .put("responseType",lanResultType)
+                .put("rawFrames",JSONArray().apply {
+                    lanFrames.forEach { f -> put(org.json.JSONObject()
+                        .put("request",f.request).put("messageType",f.messageType)
+                        .put("subtype",f.subtype).put("size",f.size)
+                        .put("checksumValid",f.checksumOk)
+                        .put("hexPrefix",f.rawPrefixHex).put("truncated",f.truncated)) }
+                })
                 .put("values",lanSnapshot.values).put("readAt",lanFetchedAt)
                 .put("result",lanStatus).put("steps",JSONArray(lanSteps)))
             .put("cloudTests", JSONArray(cloudChecks)).toString(2)
@@ -878,7 +904,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.4.json")
+            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.5.1.json")
         }, 10)
     }
     @Deprecated("Native activity result API")

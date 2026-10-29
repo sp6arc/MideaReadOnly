@@ -5,7 +5,25 @@ import org.junit.Assert.*
 import org.json.JSONObject
 
 class ProtocolTest {
-    @Test fun pythonIndependentCryptoVectors() {
+    @Test fun c3X01Profile171H120FBasicState36Bytes() {
+        val f=ByteArray(36)
+        f[0]=0xaa.toByte();f[1]=35;f[2]=0xc3.toByte();f[9]=3;f[10]=1
+        f[11]=1 // zone1 on
+        f[12]=5 // heat and dhw permitted
+        f[14]=3 // heating mode
+        f[16]=45;f[17]=46;f[18]=48 // zone 1/2, dhw setpoints
+        f[32]=18;f[33]=0 // tank actual / error code
+        f[35]=(-f.drop(1).sumOf{it.toInt() and 255}).toByte()
+        val d=WifiC3.decodeBasicX01(f,"171H120F")
+        assertEquals(1,d["lan_zone1_power_state"])
+        assertEquals(0,d["lan_dhw_power_state"])
+        assertEquals(45,d["lan_zone1_temp_set"])
+        assertEquals(18,d["lan_tank_actual_temp"])
+        assertFalse(d.containsKey("comp_run_freq"))
+        f[20]=3
+        assertThrows(IllegalArgumentException::class.java){WifiC3.decodeBasicX01(f,"171H120F")}
+    }
+        @Test fun pythonIndependentCryptoVectors() {
         assertEquals("meicloud",Crypto.IOT_KEY)
         assertEquals("9547f87b005d59f906fdda84bd6d6a138c62b03679db1aba1ea996465489ef8a",Crypto.sign("{\"x\":1}","1700000000"))
         assertEquals("03a0780738aa82236f895f72aaeb32e7fc1ff2c60326c4dfd3434dcfc9d350c3",Crypto.password("123456","test-password"))

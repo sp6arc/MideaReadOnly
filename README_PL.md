@@ -46,3 +46,10 @@ Jeżeli wcześniej instalowane było APK podpisane **innym kluczem testowym**, A
 ## Automatyczne budowanie APK
 
 W projekcie znajduje się workflow GitHub Actions `.github/workflows/build-android-apk.yml`. Wymagane SDK pobierane jest na serwerze GitHub; po udanym przebiegu builda APK jest publikowany jako artefakt. Instrukcja: `docs/JAK_UTWORZYC_APK_PL.md`.
+
+
+## 0.5.1: naprawa diagnostyki lokalnej
+
+Po pierwszym rzeczywistym teście M-Thermal `171H120F` V3 wykazano poprawną odpowiedź C3 X01 (36 bajtów) mimo braku X10/X0A. Teraz aplikacja najpierw odpytuje X01, dekoduje wyłącznie potwierdzone pola podstawowe dla tego profilu, a następnie próbuje X10 i X0A z dłuższymi limitami czasu. Zachowuje do 88 bajtów każdej odpowiedzi C3 (serial w końcówce ramki jest pomijany), kody typu, długości i kontrolę sumy w eksporcie.
+
+**Ważne:** sukces X01 nie jest sukcesem odczytu częstotliwości sprężarki i temperatur wymienników. Te wymagają X10 lub innego potwierdzonego komunikatu.
