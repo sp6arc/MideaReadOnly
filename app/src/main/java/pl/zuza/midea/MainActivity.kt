@@ -14,6 +14,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
+import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
 import java.util.concurrent.Executors
@@ -46,7 +47,19 @@ class MainActivity : Activity() {
     private var savedPassword = ""
     private var rememberLogin = true
     private var rememberedPumpId: Long? = null
-    private var tab = 0 // 0 overview, 1 all data, 2 settings
+    private var tab = 0 // 0 panel, 1 cloud, 2 Wi-Fi, 3 comparison, 4 settings
+    private var localPump: LanPump? = null
+    private var lanDiscoveries = emptyList<LanPump>()
+    private var lanSnapshot = Telemetry.capture(JSONObject())
+    private var lanFetchedAt = ""
+    private var lanRawX10 = ""
+    private var lanSteps = listOf<String>()
+    private var lanStatus = "Nie testowano połączenia Wi-Fi"
+    private var cloudChecks = mutableListOf<String>()
+    private var lastWifiIp = ""
+    private var localProtocol = 3
+    private var lastWifiRead = -60_000L
+
     private var onlyUnknown = false
     private var searchQuery = ""
 
@@ -256,8 +269,11 @@ class MainActivity : Activity() {
         snapshot = Telemetry.capture(JSONObject())
         source = "brak"; fetchedAt = ""; rawX10 = ""
         luaSnapshot = Telemetry.capture(JSONObject()); luaFetchedAt = ""
+        lanSnapshot = Telemetry.capture(JSONObject());lanFetchedAt = "";lanRawX10="";lanSteps=emptyList()
+        lanDiscoveries=emptyList();localPump=null;lanStatus="Nie testowano połączenia Wi-Fi"
+        cloudChecks.clear()
         lastCode = null; errorEndpoint = null; errorAt = ""; feedback = ""
-        lastStatus = -60_000L; lastDiagnostic = -60_000L
+        lastStatus = -60_000L; lastDiagnostic = -60_000L;lastWifiRead=-60_000L
         onlyUnknown = false; searchQuery = ""; tab = 0
         rememberedPumpId = p.id
         if (rememberLogin && savedPassword.isNotBlank()) {
@@ -372,8 +388,9 @@ class MainActivity : Activity() {
             setPadding(dp(3), dp(3), dp(3), dp(3))
             background = shape(Color.rgb(231, 238, 246), 16)
         }
-        root.addView(tabs, LinearLayout.LayoutParams(-1, dp(54)))
-        listOf("Pulpit", "Diagnostyka", "Ustawienia").forEachIndexed { index, name ->
+        val tabScroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false;addView(tabs) }
+        root.addView(tabScroll, LinearLayout.LayoutParams(-1, dp(54)))
+        listOf("Panel", "Chmura", "Wi-Fi", "Porównaj", "Opcje").forEachIndexed { index, name ->
             val cell = TextView(this).apply {
                 text = name
                 textSize = 13f
@@ -383,7 +400,7 @@ class MainActivity : Activity() {
                 background = shape(if (tab == index) white else Color.TRANSPARENT, 13)
                 setOnClickListener { if (!busy) { tab = index; dashboard() } }
             }
-            tabs.addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
+            tabs.addView(cell, LinearLayout.LayoutParams(dp(87), -1))
         }
         spacing(root, 12)
         if (lastCode != null) {
@@ -396,6 +413,8 @@ class MainActivity : Activity() {
         when (tab) {
             0 -> overview(pump)
             1 -> rawData(pump)
+            2 -> wifiTab(pump)
+            3 -> comparisonTab(pump)
             else -> settings(pump)
         }
         if (feedback.isNotBlank()) {
@@ -590,6 +609,149 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun wifiTab(pump: Pump) {
+        card(root, bluePale) { c ->
+            title(c,"Wi-Fi lokalne · Midea C3")
+            caption(c,"Telefon musi być połączony z tą samą siecią Wi-Fi co fabryczny moduł pompy. Brak Home Assistant, Modbus i dodatkowych urządzeń.")
+            spacing(c,9)
+            label(c,"Połączenie: $lanStatus",14,ink,true)
+            if(lanFetchedAt.isNotBlank())caption(c,"Odczyt: ${lanFetchedAt.take(19)} UTC • ${lanSnapshot.fields.size} pól")
+            spacing(c,10)
+            action(c,"Wyszukaj pompę w sieci Wi-Fi", primary=true){ findLan() }
+        }
+        if(lanDiscoveries.isNotEmpty()) {
+            card(root){ c ->
+                title(c,"Znalezione urządzenia C3")
+                lanDiscoveries.forEach { d ->
+                    fieldRow(c,d.display,if(d.id==pump.id)"TA SAMA POMPA" else "Inny identyfikator")
+                    spacing(c,6)
+                    action(c, "Użyj ${d.host} (${if(d.protocol==3)"V3" else "V2"})"){
+                        if(d.id != pump.id) { statusText.text="To inne urządzenie. Można odczytać tylko wybraną pompę." }
+                        else { localPump=d;localProtocol=d.protocol;lanStatus="Wybrano ${d.display}";dashboard() }
+                    }
+                    spacing(c,10)
+                }
+            }
+        }
+        card(root) { c ->
+            title(c,"Połączenie po adresie IP")
+            caption(c,"Gdy router blokuje broadcast, wpisz lokalny IP fabrycznego modułu. Port z wykrywania jest preferowany; dla ręcznego IP: 6444.")
+            val ip=EditText(this).apply {
+                hint="192.168.1.50";setText(lastWifiIp.ifBlank{localPump?.host.orEmpty()});textSize=16f;setSingleLine(true)
+                inputType=InputType.TYPE_CLASS_TEXT
+            }
+            c.addView(ip)
+            spacing(c,7)
+            action(c,"Użyj tego adresu i wybranego protokołu"){
+                val value=ip.text.toString().trim()
+                try { WifiC3.checkedIp(value)
+                    lastWifiIp=value
+                    localPump=LanPump(value,6444,pump.id,0xc3,localProtocol,pump.sn8)
+                    lanStatus="Adres ręczny: $value · V$localProtocol";dashboard()
+                } catch(e:Exception) { statusText.text=e.message.orEmpty() }
+            }
+            spacing(c,8)
+            action(c,"Protokół: V${localProtocol} — zmień V2/V3"){
+                localProtocol=if(localProtocol==3)2 else 3
+                localPump=localPump?.copy(protocol=localProtocol)
+                dashboard()
+            }
+            caption(c,"V3 wymaga kluczy urządzenia z konta SmartHome. V2 korzysta z historycznego protokołu Midea; wiele nowych modułów odrzuca V2.")
+        }
+        card(root){ c ->
+            title(c,"Diagnostyka lokalna")
+            caption(c,"Odczytujemy X10 (sprężarka, wymienniki, woda), X0A (HMI) i X01 (status). Zapytania są wyłącznie odczytowe; brak sterowania urządzeniem.")
+            spacing(c,9)
+            action(c,"Odczytaj parametry bezpośrednio",primary=true){ readLan() }
+            if(lanSnapshot.fields.isNotEmpty()){
+                spacing(c,11)
+                lanSnapshot.fields.forEach{ f->fieldRow(c,f.recognizedLabel?:f.key,f.shownValue)}
+            }
+        }
+        if(lanSteps.isNotEmpty())card(root){ c ->
+            title(c,"Dziennik połączenia Wi-Fi")
+            lanSteps.forEach{caption(c,"• $it")}
+            spacing(c,10)
+            action(c,"Eksportuj wyniki testu") { export(pump) }
+        }
+    }
+
+    private fun readLan(){
+        val p=selected ?:return
+        val l=localPump ?: run{statusText.text="Najpierw wyszukaj moduł lub podaj jego IP";return}
+        if(l.id!=p.id){statusText.text="Identyfikator urządzenia różni się od wybranej pompy";return}
+        val now=SystemClock.elapsedRealtime()
+        if(now-lastWifiRead in 0..29_999L){statusText.text="Ponów odczyt Wi-Fi po 30 sekundach.";return}
+        lastWifiRead=now
+        runTask("Łączenie Wi-Fi z ${l.host}…",{
+            // Never store or print LAN token/key. Obtained using currently authenticated cloud session.
+            val keys= if(l.protocol==3) cloud.lanKeys(p.id) else null
+            WifiC3.poll(this,l,p.sn8,keys)
+        },{result->
+            lanSnapshot=Telemetry.capture(JSONObject(result.readings));lanRawX10=result.rawX10
+            lanFetchedAt=Instant.now().toString()
+            lanSteps=result.steps
+            lanStatus=if(result.readings.isEmpty())"Połączono, brak potwierdzonych danych X10" else "Odebrano ${result.readings.size} parametrów z X10"
+            feedback=lanStatus;dashboard()
+        },{e ->
+            lanStatus="Błąd Wi-Fi: ${e.message?.take(150)?:e.javaClass.simpleName}"
+            lanSteps=lanSteps+listOf(lanStatus)
+            feedback=lanStatus;dashboard()
+        })
+    }
+    private fun findLan(){
+        runTask("Wyszukiwanie fabrycznego Wi-Fi C3…",{WifiC3.discover(this)},{found ->
+            lanDiscoveries=found
+            val p=selected
+            localPump=found.firstOrNull{it.id==p?.id}
+            if(localPump!=null) localProtocol=localPump!!.protocol
+            lanStatus=if(found.isEmpty())"Nie wykryto modułu — spróbuj podać IP" else "Wykryto ${found.size} urządzeń C3"
+            feedback=lanStatus;dashboard()
+        },{e ->lanStatus="Błąd wykrywania: ${e.message?.take(130)}";feedback=lanStatus;dashboard()})
+    }
+    private fun comparisonTab(pump:Pump){
+        card(root,bluePale){ c->
+            title(c,"Chmura kontra Wi-Fi")
+            caption(c,"Porównanie tylko rzeczywiście odebranych wartości. Znak — oznacza brak parametru, nie wartość 0.")
+            fieldRow(c,"Chmura SmartHome", "${snapshot.fields.size} pól")
+            fieldRow(c,"Chmura Lua serwisowa", "${luaSnapshot.fields.size} pól")
+            fieldRow(c,"Wi-Fi (X10)", "${lanSnapshot.fields.size} pól")
+        }
+        val mapped=listOf(
+            Triple("Sprężarka – częstotliwość","comp_run_freq","compRunFreq"),
+            Triple("Sprężarka – prąd","odu_comp_current","oduCompCurrent"),
+            Triple("Woda – wejście Tw_in","temp_tw_in","tempTwin"),
+            Triple("Woda – wyjście Tw_out","temp_tw_out","tempTwout"),
+            Triple("Wymiennik T2","temp_t2","tempT2"),
+            Triple("Wymiennik T2B","temp_t2b","tempT2b"),
+            Triple("Wymiennik T3","temp_t3","tempT3"),
+            Triple("Temperatura tłoczenia TP","temp_tp","tempTp"),
+            Triple("Zewnętrzna T4","temp_t4","tempT4"),
+            Triple("Ciśnienie wysokie","pressure_high","pressureHigh"),
+            Triple("Ciśnienie niskie","pressure_low","pressureLow"),
+            Triple("Wentylator","fan_speed","fanSpeed")
+        )
+        card(root){c->
+            title(c,"Diagnostyka pracy pompy")
+            caption(c,"Format: Wi-Fi / Chmura serwisowa. Surowe wartości nie są utożsamiane z temperaturami zadanymi.")
+            mapped.forEach{(name,local,remote)->
+                val l=lanSnapshot.values.optString(local,"").ifBlank{"—"}
+                val cr=luaSnapshot.values.optString(remote,"").ifBlank{luaSnapshot.values.optString(local,"").ifBlank{"—"}}
+                fieldRow(c,name,"$l / $cr",l=="—"&&cr=="—")
+            }
+        }
+        card(root){ c ->
+            title(c,"Stan konfiguracji z chmury")
+            fieldRow(c,"Tryb ustawiony",cloudValue("run_mode_set")?:"—")
+            fieldRow(c,"Obieg 1 (nastawa)",cloudValue("zone1_temp_set")?:"—")
+            fieldRow(c,"CWU (odczyt)",cloudValue("tank_actual_temp")?:"—")
+            fieldRow(c,"Kod błędu",cloudValue("error_code")?:"—")
+            caption(c,"Te pola nie są równoważne diagnostyce sprężarki. Odczyty z LAN i chmury mogą mieć różne czasy i skale.")
+            spacing(c,10)
+            action(c,"Eksportuj porównanie JSON",primary=true){export(pump)}
+        }
+    }
+
     private fun settings(pump: Pump) {
         card(root) { c ->
             title(c, "Połączona pompa")
@@ -613,7 +775,7 @@ class MainActivity : Activity() {
             spacing(c, 6)
             caption(c, "Nie uruchamiamy Home Assistant. Nie korzystamy z Modbus, LAN ani dodatkowych modułów. Brak zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.4.0 • interfejs Midea × kafelki Home Assistant")
+            caption(c, "Wersja 0.5.0 • Chmura + lokalne Wi-Fi")
         }
     }
 
@@ -637,9 +799,13 @@ class MainActivity : Activity() {
             luaFetchedAt = Instant.now().toString()
             clearError()
             feedback = "Lua 0x10: odebrano ${luaSnapshot.fields.size} pól. Jeśli brakuje sprężarki, chmura nie przekazała diagnostyki."
+            cloudChecks.add("Lua 0x10: ${luaSnapshot.fields.size} pól — ${Instant.now()}")
             tab = 1
             dashboard()
-        }, { error -> failedRead(error) })
+        }, { error ->
+            cloudChecks.add("Lua 0x10: ${error.message?.take(100) ?: error.javaClass.simpleName}")
+            failedRead(error)
+        })
     }
     private fun fetchDiagnostic() {
         val p = selected ?: return
@@ -703,7 +869,11 @@ class MainActivity : Activity() {
             lastCode, errorEndpoint, errorAt, rawX10)
             .put("luaUnitDiagnostics", luaSnapshot.values)
             .put("luaUnitDiagnosticsFetchedAt", luaFetchedAt)
-            .put("luaUnitDiagnosticsFields", luaSnapshot.fields.size).toString(2)
+            .put("luaUnitDiagnosticsFields", luaSnapshot.fields.size)
+            .put("wifi", org.json.JSONObject().put("receivedFields",lanSnapshot.fields.size)
+                .put("values",lanSnapshot.values).put("readAt",lanFetchedAt)
+                .put("result",lanStatus).put("steps",JSONArray(lanSteps)))
+            .put("cloudTests", JSONArray(cloudChecks)).toString(2)
         @Suppress("DEPRECATION")
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)

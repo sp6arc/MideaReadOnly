@@ -10,9 +10,10 @@ internal object ReadPolicy {
     const val LOGIN = "/mj/user/login"
     const val LIST = "/v1/appliance/user/list/get"
     const val STATUS = "/v1/device/status/lua/get"
+    const val TOKEN = "/v1/iot/secure/getToken"
     const val RELAY = "/v1/appliance/transparent/send"
     fun check(endpoint: String, body: JSONObject, frame: ByteArray? = null) {
-        require(endpoint in setOf(ROUTE, LOGIN_ID, LOGIN, LIST, STATUS, RELAY)) { "Zablokowane żądanie" }
+        require(endpoint in setOf(ROUTE, LOGIN_ID, LOGIN, LIST, STATUS, TOKEN, RELAY)) { "Zablokowane żądanie" }
         if (endpoint == STATUS) {
             val command = body.getJSONObject("command")
             require(command.length() == 1 && command.has("query"))
@@ -21,6 +22,10 @@ internal object ReadPolicy {
                 (query.length() == 1 && query.has("query_type") && query.optString("query_type") == "16")) {
                 "Dozwolone są wyłącznie odczyty: podstawowy oraz Lua 0x10"
             }
+        }
+        if(endpoint == TOKEN) {
+            require(body.optString("applianceCodes").toLongOrNull()?.let{it>0}==true &&
+                body.optString("udpid").matches(Regex("[0-9a-f]{32}"))) { "Nieprawidłowe zapytanie LAN token" }
         }
         if (endpoint == RELAY) require(frame != null && frame.contentEquals(C3.query())) { "Dozwolony tylko odczyt X10" }
     }

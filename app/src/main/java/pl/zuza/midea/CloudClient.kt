@@ -90,6 +90,26 @@ internal class CloudClient(private val transport: ((String, Map<String,String>, 
     /** Midea's 171H120F Lua defines query_type=16 (0x10) as read-only unit parameters.
      * Whether the cloud will return it depends on the device/firmware; not a control command. */
     fun unitDiagnosticsLua(p: Pump): JSONObject = cloudQuery(p, obj("query_type" to "16"))
+    /** Obtain LAN-only V3 token and key for the selected user's own appliance. Never export or persist. */
+    fun lanKeys(applianceId:Long): Pair<ByteArray, ByteArray> {
+        val failures=mutableListOf<Int>()
+        for(method in listOf(1,2)){
+            val id=ByteArray(6){ i -> if(method==1) (applianceId ushr (8*(5-i))).toByte() else (applianceId ushr (8*i)).toByte() }
+            val digest=java.security.MessageDigest.getInstance("SHA-256").digest(id)
+            val udp=Crypto.hex(ByteArray(16){ i->(digest[i].toInt() xor digest[i+16].toInt()).toByte()})
+            val res=try { request(ReadPolicy.TOKEN,general().put("udpid",udp).put("applianceCodes",applianceId.toString())) }
+                catch(e:CloudException){failures.add(e.code);continue}
+            val list=res.optJSONArray("tokenlist")?:continue
+            for(i in 0 until list.length()){
+                val item=list.optJSONObject(i)?:continue
+                if(!item.optString("udpId").equals(udp,true))continue
+                val a=runCatching{Crypto.unhex(item.getString("token"))}.getOrNull()?:continue
+                val b=runCatching{Crypto.unhex(item.getString("key"))}.getOrNull()?:continue
+                if(a.size>=32 && b.size==32)return Pair(a,b)
+            }
+        }
+        throw IllegalStateException("Chmura nie udostępniła kluczy Wi-Fi V3 (${failures.distinct().joinToString(",").ifEmpty{"brak tokenu"}})")
+    }
     fun diagnostic(p: Pump): DiagnosticResult {
         val packet=C3.packet(p.id)
         val csv=packet.joinToString(",") { (it.toInt() and 255).toString() }
