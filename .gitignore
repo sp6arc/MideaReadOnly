@@ -1,5 +1,5 @@
 .gradle/
-/build/
-/app/build/
-/local.properties
-*.apk
+**/build/
+local.properties
+*.jks
+.idea/
