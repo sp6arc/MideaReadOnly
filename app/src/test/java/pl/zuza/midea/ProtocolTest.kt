@@ -22,6 +22,12 @@ class ProtocolTest {
         assertThrows(IllegalArgumentException::class.java) { ReadPolicy.check(ReadPolicy.STATUS,obj("command" to obj("query" to JSONObject(),"control" to obj("power" to "off")))) }
         assertThrows(IllegalArgumentException::class.java) { ReadPolicy.check(ReadPolicy.STATUS,obj("command" to obj("query" to obj("power" to "off")))) }
         ReadPolicy.check(ReadPolicy.STATUS,obj("command" to obj("query" to JSONObject())))
+        ReadPolicy.check(ReadPolicy.STATUS,obj("command" to obj("query" to obj("query_type" to "16"))))
+        listOf("1", "0", "02", "17", "16;control").forEach { other ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ReadPolicy.check(ReadPolicy.STATUS,obj("command" to obj("query" to obj("query_type" to other))))
+            }
+        }
     }
     @Test fun relayRejectsAnyDifferentFrame() {
         ReadPolicy.check(ReadPolicy.RELAY,JSONObject(),C3.query())
@@ -120,6 +126,32 @@ class ProtocolTest {
         assertFalse(exported.contains("secretToken"))
         assertFalse(exported.contains("privateSerial"))
         assertTrue(exported.contains("arbitrary_data"))
+    }
+    @Test fun c3CloudDashboardFieldsAreMappedWithoutInventingCompressor() {
+        val raw = obj(
+            "run_mode_set" to "heat",
+            "zone1_power_state" to "on",
+            "zone1_temp_set" to "45",
+            "zone2_power_state" to "off",
+            "zone2_temp_set" to "46",
+            "double_zone_enable" to "off",
+            "dhw_power_state" to "off",
+            "dhw_enable" to "on",
+            "tank_actual_temp" to "21",
+            "dhw_temp_set" to "48",
+            "room_temp_set" to "23",
+            "error_code" to "0"
+        )
+        val data = Telemetry.capture(raw)
+        assertEquals(12, data.fields.size)
+        assertEquals(12, data.recognized)
+        assertEquals(0, data.unknown)
+        assertFalse(data.values.has("comp_run_freq"))
+        assertFalse(data.values.has("pressure_high"))
+        assertEquals("on", data.values.getString("dhw_enable"))
+        assertEquals("off", data.values.getString("dhw_power_state"))
+        assertEquals("46", data.values.getString("zone2_temp_set"))
+        assertEquals("off", data.values.getString("zone2_power_state"))
     }
     @Test fun expandedC3DashboardLabelsDoNotInventUnits() {
         val names = listOf("comp_run_freq", "odu_comp_current", "pressure_high",

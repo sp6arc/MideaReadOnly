@@ -26,6 +26,34 @@ internal data class TelemetrySnapshot(val values: JSONObject, val fields: List<T
 
 internal object Telemetry {
     val priorities = linkedMapOf(
+        // Klucze oryginalnego Lua T_0000_C3_171H120F (case insensitive).
+        "comprunfreq" to "Sprężarka — aktualna częstotliwość (odczyt surowy)",
+        "odutargetfre" to "Sprężarka — częstotliwość zadana (odczyt surowy)",
+        "oducompcurrent" to "Prąd sprężarki (odczyt surowy)",
+        "unitmoderun" to "Rzeczywisty tryb jednostki (odczyt surowy)",
+        "fanspeed" to "Wentylator jednostki zewnętrznej (odczyt surowy)",
+        "temptwin" to "Temperatura powrotu wody Tw_in (odczyt surowy)",
+        "temptwout" to "Temperatura zasilania wody Tw_out (odczyt surowy)",
+        "tempt1" to "Temperatura T1 (odczyt surowy)",
+        "tempt2" to "Temperatura T2 wymiennika (odczyt surowy)",
+        "tempt2b" to "Temperatura T2B wymiennika (odczyt surowy)",
+        "tempt3" to "Temperatura wymiennika zewnętrznego T3 (odczyt surowy)",
+        "tempt4" to "Temperatura zewnętrzna T4 (odczyt surowy)",
+        "temptp" to "Temperatura tłoczenia TP (odczyt surowy)",
+        "tempth" to "Temperatura TH (odczyt surowy)",
+        "temptf" to "Temperatura TF (odczyt surowy)",
+        "pressurehigh" to "Ciśnienie strony wysokiej (odczyt surowy)",
+        "pressurelow" to "Ciśnienie strony niskiej (odczyt surowy)",
+        "oduvoltage" to "Napięcie jednostki zewnętrznej (odczyt surowy)",
+        "exvcurrent" to "Zawór rozprężny EXV (odczyt surowy)",
+        "waterflow" to "Przepływ wody (odczyt surowy)",
+        "waterpressure" to "Ciśnienie wody (odczyt surowy)",
+        "fgdefrost" to "Odszranianie (odczyt surowy)",
+        "fgdhwrun" to "Grzanie CWU w trakcie (odczyt surowy)",
+        "total_electricity0" to "Łączne zużycie energii (odczyt surowy)",
+        "total_thermal0" to "Łączna energia cieplna (odczyt surowy)",
+        "totalelectricity0" to "Łączne zużycie energii (odczyt surowy)",
+        "totalthermal0" to "Łączna energia cieplna (odczyt surowy)",
         "comp_run_freq" to "Częstotliwość sprężarki (surowa)",
         "compressor_on" to "Sprężarka pracuje (surowe)",
         "unit_mode_run" to "Tryb pracy jednostki (surowy)",
@@ -61,7 +89,49 @@ internal object Telemetry {
         "instant_power0" to "Pobór mocy (surowy)",
         "temp_tw_out" to "Temperatura wyjścia wody (surowa)",
         "t4" to "Temperatura zewnętrzna T4 (surowa)",
-        "tank_actual_temp" to "Temperatura zasobnika (surowa)"
+        "tank_actual_temp" to "Temperatura zasobnika CWU (odczyt)",
+        "dhw_temp_set" to "CWU — temperatura zadana",
+        "dhw_power_state" to "CWU — włączenie",
+        "dhw_enable" to "CWU — funkcja dostępna",
+        "dhw_max_set_temp" to "CWU — maksymalna nastawa",
+        "dhw_min_set_temp" to "CWU — minimalna nastawa",
+        "run_mode_set" to "Ustawiony tryb pracy",
+        "runmode_under_auto" to "Tryb w automatyce",
+        "zone1_power_state" to "Obieg 1 — włączenie",
+        "zone2_power_state" to "Obieg 2 — włączenie",
+        "double_zone_enable" to "Konfiguracja dwóch obiegów",
+        "zone1_terminal_type" to "Obieg 1 — typ odbiornika",
+        "zone2_terminal_type" to "Obieg 2 — typ odbiornika",
+        "zone1_temp_type" to "Obieg 1 — regulacja temperatury",
+        "zone2_temp_type" to "Obieg 2 — regulacja temperatury",
+        "zone1_curve_state" to "Obieg 1 — krzywa pogodowa",
+        "zone2_curve_state" to "Obieg 2 — krzywa pogodowa",
+        "zone1_heat_max_set_temp" to "Obieg 1 — maksymalna nastawa ogrzewania",
+        "zone1_heat_min_set_temp" to "Obieg 1 — minimalna nastawa ogrzewania",
+        "zone2_heat_max_set_temp" to "Obieg 2 — maksymalna nastawa ogrzewania",
+        "zone2_heat_min_set_temp" to "Obieg 2 — minimalna nastawa ogrzewania",
+        "zone1_cool_max_set_temp" to "Obieg 1 — maksymalna nastawa chłodzenia",
+        "zone1_cool_min_set_temp" to "Obieg 1 — minimalna nastawa chłodzenia",
+        "zone2_cool_max_set_temp" to "Obieg 2 — maksymalna nastawa chłodzenia",
+        "zone2_cool_min_set_temp" to "Obieg 2 — minimalna nastawa chłodzenia",
+        "room_temp_set" to "Temperatura pokojowa — nastawa (nie pomiar)",
+        "room_min_set_temp" to "Nastawa pokojowa — minimum",
+        "room_max_set_temp" to "Nastawa pokojowa — maksimum",
+        "room_thermalen_state" to "Regulacja pokojowa — możliwość",
+        "room_thermalmode_state" to "Regulacja pokojowa — tryb aktywny",
+        "heat_enable" to "Ogrzewanie — dostępne",
+        "cool_enable" to "Chłodzenie — dostępne",
+        "fastdhw_state" to "CWU — szybkie grzanie",
+        "forcetbh_state" to "Grzałka zasobnika — wymuszenie",
+        "boostertbh_en" to "Grzałka zasobnika — możliwość",
+        "eco_on_state" to "Tryb ECO",
+        "silence_on_state" to "Tryb cichy",
+        "holiday_on_state" to "Tryb urlopowy",
+        "SysEnergyAnaEN".lowercase() to "Analiza energii — system",
+        "HMIEnergyAnaSetEN".lowercase() to "Analiza energii — HMI",
+        "time_set_state" to "Program czasowy — stan",
+        "remote_onoff" to "Zdalne włączenie — opcja",
+        "version" to "Numer wersji protokołu (surowy)"
     )
 
     // Some cloud responses contain identifiers/session metadata. Keep key presence but not the secret.
@@ -151,7 +221,7 @@ internal object Telemetry {
             ))
         }
         return obj(
-            "app" to "Midea ReadOnly 0.3.0",
+            "app" to "Midea ReadOnly 0.4.0",
             "source" to source,
             "fetchedAt" to fetchedAt,
             "measurementTimeKnown" to false,
@@ -166,7 +236,7 @@ internal object Telemetry {
             "errorEndpoint" to errorEndpoint,
             "errorAt" to errorAt,
             "rawX10Hex" to (if (rawX10.isEmpty()) JSONObject.NULL else rawX10),
-            "notice" to "Surowe dane odczytowe SmartHome. Nieznane pola pozostają nieopisane; jednostki i skale wymagają weryfikacji. Czas pobrania nie oznacza czasu pomiaru. Błąd 9999 jest odpowiedzią chmury, nie kodem usterki pompy."
+            "notice" to "Pola status/lua/get obejmują głównie nastawy i stany sterownika, nie pełne pomiary układu chłodniczego. Temperatury przedstawiane w UI jako °C według semantyki pól, lecz skala nie była niezależnie potwierdzona. Czas pobrania nie jest czasem pomiaru. Błąd 9999 jest odpowiedzią API chmury, a nie alarmem urządzenia."
         )
     }
 }

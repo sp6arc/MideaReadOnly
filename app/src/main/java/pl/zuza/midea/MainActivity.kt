@@ -33,6 +33,8 @@ class MainActivity : Activity() {
     private var source = "brak"
     private var fetchedAt = ""
     private var rawX10 = ""
+    private var luaSnapshot = Telemetry.capture(JSONObject())
+    private var luaFetchedAt = ""
     private var lastCode: Int? = null
     private var errorEndpoint: String? = null
     private var errorAt = ""
@@ -253,6 +255,7 @@ class MainActivity : Activity() {
         selected = p
         snapshot = Telemetry.capture(JSONObject())
         source = "brak"; fetchedAt = ""; rawX10 = ""
+        luaSnapshot = Telemetry.capture(JSONObject()); luaFetchedAt = ""
         lastCode = null; errorEndpoint = null; errorAt = ""; feedback = ""
         lastStatus = -60_000L; lastDiagnostic = -60_000L
         onlyUnknown = false; searchQuery = ""; tab = 0
@@ -265,32 +268,129 @@ class MainActivity : Activity() {
         if (initialRead) fetchStatus()
     }
 
+    private fun cloudValue(key: String): String? = snapshot.values.optString(key, "").takeIf { it.isNotBlank() }
+    private fun temp(key: String): String = cloudValue(key)?.let { v ->
+        if (v.matches(Regex("-?[0-9]+([.][0-9]+)?"))) "$v °C" else "—"
+    } ?: "—"
+    private fun diagValue(vararg keys: String): String = keys.firstNotNullOfOrNull { name ->
+        luaSnapshot.values.optString(name, "").takeIf { it.isNotBlank() }
+    } ?: "—"
+    private fun state(key: String): String = when (cloudValue(key)?.lowercase()) {
+        "on" -> "Włączone"
+        "off" -> "Wyłączone"
+        else -> "Nieznane"
+    }
+    private fun modeName(): String = when (cloudValue("run_mode_set")) {
+        "heat" -> "OGRZEWANIE"
+        "cool" -> "CHŁODZENIE"
+        "auto" -> "AUTO"
+        else -> "TRYB NIEZNANY"
+    }
+    private fun fieldRow(parent: LinearLayout, name: String, value: String, dim: Boolean = false) {
+        val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        parent.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        label(line, name, 13, muted).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
+        label(line, value, 14, if (dim) muted else ink, true)
+    }
+    private fun metricTile(host: LinearLayout, heading: String, value: String, footer: String, accent: Int = blue) {
+        val tile = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), dp(15), dp(11), dp(14))
+            minimumHeight = dp(125)
+            background = shape(white, 18)
+            elevation = dp(1).toFloat()
+        }
+        host.addView(tile, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(4); rightMargin = dp(4); bottomMargin = dp(8) })
+        label(tile, heading, 12, muted, false, 9)
+        label(tile, value, 24, accent, true, 6)
+        label(tile, footer, 11, muted)
+    }
+    private fun metricPair(firstName: String, firstValue: String, firstNote: String,
+                           secondName: String, secondValue: String, secondNote: String,
+                           firstAccent: Int = blue, secondAccent: Int = blue) {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(row)
+        metricTile(row, firstName, firstValue, firstNote, firstAccent)
+        metricTile(row, secondName, secondValue, secondNote, secondAccent)
+    }
+    private fun section(name: String, subtitle: String = "") {
+        spacing(root, 13)
+        label(root, name, 19, ink, true, 6)
+        if (subtitle.isNotBlank()) caption(root, subtitle)
+        spacing(root, 8)
+    }
+    private fun hero(pump: Pump) {
+        val deep = Color.rgb(10, 78, 151)
+        val pale = Color.rgb(209, 237, 255)
+        val holder = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.rgb(13, 124, 200), deep)).apply { cornerRadius = dp(25).toFloat() }
+            elevation = dp(3).toFloat()
+        }
+        root.addView(holder, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(15) })
+        label(holder, "M-THERMAL   R32   •   ${pump.sn8}", 12, pale, true, 10)
+        label(holder, modeName(), 26, white, true, 5)
+        label(holder, "Tryb wybrany na sterowniku, nie potwierdzenie pracy sprężarki", 11, pale)
+        spacing(holder, 18)
+        val mainRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        holder.addView(mainRow)
+        val target = temp("zone1_temp_set")
+        val circle = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.argb(20,255,255,255))
+                setStroke(dp(3), Color.argb(175,255,255,255))
+            }
+        }
+        mainRow.addView(circle, LinearLayout.LayoutParams(dp(158), dp(158)))
+        label(circle, "ZADANA · OBIEG 1", 10, pale, true, 6)
+        label(circle, target, if (target.length > 6) 31 else 35, white, true)
+        val side = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), 0, 0, 0)
+        }
+        mainRow.addView(side, LinearLayout.LayoutParams(0, -2, 1f))
+        label(side, "●  ${if (pump.online) "ONLINE" else "OFFLINE"}", 12, pale, true, 9)
+        label(side, "Obieg 1", 12, pale)
+        label(side, state("zone1_power_state"), 17, white, true, 11)
+        label(side, "CWU", 12, pale)
+        label(side, state("dhw_power_state"), 17, white, true)
+        spacing(holder, 17)
+        val foot = "Odczyt: " + (if (fetchedAt.isBlank()) "brak" else fetchedAt.replace('T', ' ').take(19) + " UTC")
+        label(holder, foot, 12, pale)
+    }
+
     private fun dashboard() {
         val pump = selected ?: return
-        baseScreen(pump.name, "M-Thermal R32 • profil ${pump.sn8} • tylko odczyt")
-        card(root, bluePale) { c ->
-            label(c, "●  ${if (pump.online) "ONLINE" else "OFFLINE"} — przy pobraniu listy urządzeń", 13, blue, true, 6)
-            label(c, if (fetchedAt.isBlank()) "Brak aktualnego odczytu" else "Ostatni udany odczyt: ${fetchedAt.replace('T', ' ').take(19)} UTC", 13, ink)
-            caption(c, "Źródło: $source • Czas pomiaru w urządzeniu nieznany")
+        baseScreen(pump.name, "Twoja pompa ciepła  •  Midea SmartHome  •  tylko podgląd")
+        hero(pump)
+        val tabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = shape(Color.rgb(231, 238, 246), 16)
         }
-        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(tabs, LinearLayout.LayoutParams(-1, dp(50)))
-        listOf("Przegląd", "Wszystkie dane", "Ustawienia").forEachIndexed { index, title ->
+        root.addView(tabs, LinearLayout.LayoutParams(-1, dp(54)))
+        listOf("Pulpit", "Diagnostyka", "Ustawienia").forEachIndexed { index, name ->
             val cell = TextView(this).apply {
-                text = title; textSize = 13f; gravity = Gravity.CENTER
+                text = name
+                textSize = 13f
+                gravity = Gravity.CENTER
                 setTypeface(Typeface.DEFAULT, if (tab == index) Typeface.BOLD else Typeface.NORMAL)
                 setTextColor(if (tab == index) blue else muted)
-                background = shape(if (tab == index) bluePale else this@MainActivity.background, 10)
+                background = shape(if (tab == index) white else Color.TRANSPARENT, 13)
                 setOnClickListener { if (!busy) { tab = index; dashboard() } }
             }
             tabs.addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
         }
-        spacing(root, 15)
+        spacing(root, 12)
         if (lastCode != null) {
             card(root, Color.rgb(255, 241, 236)) { c ->
-                label(c, "Błąd odpowiedzi chmury: $lastCode", 17, warning, true, 6)
-                caption(c, "${errorEndpoint ?: "nieznany endpoint"} • $errorAt")
-                label(c, "To kod API SmartHome, nie potwierdzona awaria pompy. Ostatni poprawny odczyt pozostaje dostępny.", 13, warning)
+                label(c, "Diagnostyka chmury: $lastCode", 15, warning, true, 4)
+                label(c, "Błąd zapytania ${errorEndpoint ?: "API"}. Nie jest to kod awarii pompy.", 12, warning)
+                if (tab == 1) caption(c, "Ostatni poprawny odczyt pozostaje dostępny. $errorAt")
             }
         }
         when (tab) {
@@ -298,54 +398,66 @@ class MainActivity : Activity() {
             1 -> rawData(pump)
             else -> settings(pump)
         }
-        if (feedback.isNotBlank()) { statusText.text = feedback; statusText.setTextColor(if (lastCode == null) muted else warning) }
+        if (feedback.isNotBlank()) {
+            statusText.text = feedback
+            statusText.setTextColor(if (lastCode == null) muted else warning)
+        }
     }
 
     private fun overview(pump: Pump) {
-        card(root) { c ->
-            title(c, "Połączenie i diagnostyka")
-            twoActions(c, "↻  Odśwież", "X10  •  Test", { fetchStatus() }, { fetchDiagnostic() })
-            spacing(c, 9)
-            caption(c, "X10 to pojedyncze zapytanie diagnostyczne. Błąd 9999 nie usuwa ostatnich odczytów.")
-        }
-        card(root) { c ->
-            title(c, "Otrzymane dane")
-            label(c, "${snapshot.fields.size} pól  •  ${snapshot.recognized} opisanych  •  ${snapshot.unknown} bez mapowania", 15, ink, true)
-            if (snapshot.fields.isEmpty()) caption(c, "Nie ma jeszcze wartości. Po połączeniu aplikacja spróbuje pobrać status.")
-            else caption(c, "Etykiety parametrów są orientacyjne; wartości pozostają surowe i nieprzeskalowane.")
-        }
-        if (snapshot.fields.isNotEmpty() && snapshot.recognized == 0) {
-            card(root, Color.rgb(255, 248, 229)) { c ->
-                title(c, "Wszystkie pola są na razie nierozpoznane")
-                label(c, "To nie znaczy, że pompa nie pracuje. Chmura zwróciła ${snapshot.fields.size} wartości, ale nie mamy jeszcze pewnego mapowania do czujników.", 14)
-                spacing(c, 8)
-                action(c, "Otwórz wszystkie wartości") { tab = 1; dashboard() }
+        if (snapshot.fields.isEmpty()) {
+            card(root) { c ->
+                title(c, "Brak odczytów")
+                caption(c, "Odczyt SmartHome zostanie pobrany po połączeniu.")
+                spacing(c, 12)
+                action(c, "↻  Pobierz dane", primary = true) { fetchStatus() }
             }
+            return
         }
-        val groups = listOf(
-            "Sprężarka i jednostka" to listOf("comp_run_freq", "odu_target_fre", "odu_comp_current", "compressor_on", "unit_mode_run", "fan_speed", "odu_voltage", "exv_current", "fg_capacity_need"),
-            "Wymienniki i czujniki" to listOf("temp_t1", "temp_t2", "temp_t2b", "temp_t3", "temp_tp", "temp_th", "temp_tf", "temp_t4", "outdoor_temperature", "t4"),
-            "Ciśnienia i obieg" to listOf("pressure_high", "pressure_low", "water_pressure", "water_flower", "temp_tw_in", "temp_tw_out", "pump_i_running"),
-            "CWU i ogrzewanie" to listOf("tank_actual_temp", "tank_actual_temperature", "temp_t5", "zone1_temp_set", "zone2_temp_set", "status_dhw", "status_heating", "status_cool"),
-            "Pozostałe odczyty" to listOf("error_code", "instant_power0")
-        )
-        val grouped = mutableSetOf<String>()
-        for ((name, keys) in groups) {
-            val fields = snapshot.fields.filter { it.recognized && it.key.lowercase() in keys }.also { grouped.addAll(it.map { f -> f.path }) }
-            if (fields.isNotEmpty()) showTiles(name, fields)
+        if (luaSnapshot.fields.isNotEmpty()) {
+            section("Aktualna praca urządzenia", "Odczyt diagnostyczny Lua 0x10 — wartości surowe")
+            metricPair("Sprężarka · Hz (surowe)", diagValue("compRunFreq", "comp_run_freq"), "Tylko gdy chmura odda parametr",
+                "Zasilanie Tw_out", diagValue("tempTwout", "temp_tw_out"), "Surowa temperatura")
+            metricPair("Powrót Tw_in", diagValue("tempTwin", "temp_tw_in"), "Surowa temperatura",
+                "Wymiennik T3", diagValue("tempT3", "temp_t3"), "Surowa temperatura")
         }
-        val rest = snapshot.fields.filter { it.recognized && it.path !in grouped }
-        if (rest.isNotEmpty()) showTiles("Inne rozpoznane parametry", rest)
-        if (snapshot.unknown > 0) card(root) { c ->
-            title(c, "Nierozpoznane pola")
-            snapshot.fields.filter { !it.recognized && !it.redacted }.take(4).forEach { f ->
-                label(c, "${f.path}  =  ${f.shownValue.take(64)}", 13, muted)
-            }
-            spacing(c, 9)
-            action(c, "Zobacz wszystkie (${snapshot.unknown})") { tab = 1; dashboard() }
+        section("Ciepła woda użytkowa", "Temperatura zasobnika a nastawa")
+        metricPair("Woda w zasobniku", temp("tank_actual_temp"), "Odczyt SmartHome",
+            "Temperatura zadana", temp("dhw_temp_set"), "Nastawa CWU")
+        card(root, bluePale) { c ->
+            fieldRow(c, "CWU — włączona", state("dhw_power_state"))
+            fieldRow(c, "Funkcja CWU dopuszczona", state("dhw_enable"))
+            caption(c, "Stan funkcji i aktualne grzanie wody to dwie różne informacje. Nie mamy sygnału faktycznej pracy sprężarki.")
         }
-        if (snapshot.fields.isNotEmpty()) card(root) { c ->
-            action(c, "Eksportuj pełny raport JSON") { export(pump) }
+        section("Obiegi grzewcze", "Nastawy i konfiguracja, nie temperatura zasilania")
+        metricPair("Obieg 1 · grzejniki", temp("zone1_temp_set"), state("zone1_power_state") + " · zadana",
+            "Obieg 2 · podłogówka", temp("zone2_temp_set"), state("zone2_power_state") + " · zadana",
+            blue, Color.rgb(121, 137, 156))
+        card(root) { c ->
+            fieldRow(c, "Dwa obiegi w konfiguracji", state("double_zone_enable"))
+            fieldRow(c, "Krzywa pogodowa obieg 1", state("zone1_curve_state"))
+            fieldRow(c, "Krzywa pogodowa obieg 2", state("zone2_curve_state"))
+            caption(c, "Odczyt 46 °C w obiegu 2 jest zapamiętaną nastawą. Obieg 2 jest wyłączony, a funkcja dwóch obiegów nieaktywna.")
+        }
+        section("Komfort i ustawienia")
+        metricPair("Temperatura pokojowa", temp("room_temp_set"), "Zadana · nie pomiar",
+            "Kod błędu pompy", cloudValue("error_code") ?: "—", "Wartość sterownika",
+            blue, if (cloudValue("error_code") == "0") Color.rgb(26, 145, 103) else warning)
+        card(root) { c ->
+            fieldRow(c, "ECO", state("eco_on_state"))
+            fieldRow(c, "Tryb cichy", state("silence_on_state"))
+            fieldRow(c, "Tryb urlopowy", state("holiday_on_state"))
+            fieldRow(c, "Szybkie CWU", state("fastdhw_state"))
+        }
+        section("Odczyt i połączenie")
+        card(root) { c ->
+            label(c, "${snapshot.fields.size} pól odebranych  •  ${snapshot.recognized} opisanych", 15, ink, true, 6)
+            caption(c, "Dane ze status/lua/get. Czas pomiaru w urządzeniu jest nieznany.")
+            caption(c, "Jednostki °C są interpretacją nazw pól i wymagają porównania ze sterownikiem.")
+            spacing(c, 13)
+            action(c, "↻  Odśwież odczyt", primary = true) { fetchStatus() }
+            spacing(c, 8)
+            action(c, "Pełna diagnostyka i pola surowe") { tab = 1; dashboard() }
         }
     }
 
@@ -375,8 +487,50 @@ class MainActivity : Activity() {
     }
 
     private fun rawData(pump: Pump) {
+        card(root, bluePale) { c ->
+            title(c, "Diagnostyka układu chłodniczego")
+            label(c, "Sprężarka · wymienniki · ciśnienia", 14, ink, true, 7)
+            caption(c, "W obecnym status/lua/get nie ma częstotliwości sprężarki, temperatur T2/T2B/T3/TP/TH ani ciśnień. Nie podstawiamy w ich miejsce nastaw.")
+            spacing(c, 10)
+            action(c, "Odczytaj parametry serwisowe — Lua 0x10", primary = true) { fetchLuaDiagnostic() }
+            caption(c, "Eksperymentalne zapytanie odczytowe query_type=16 przez działające API status/lua/get. Nie zmienia nastaw.")
+            spacing(c, 9)
+            action(c, "X10  •  Stary test transparent/send") { fetchDiagnostic() }
+            caption(c, "Zapytanie X10 może zwrócić błąd API 9999. Nie oznacza to alarmu pompy.")
+        }
+        if (luaSnapshot.fields.isNotEmpty()) {
+            card(root) { c ->
+                title(c, "Odczyt serwisowy Lua 0x10")
+                caption(c, "Odebrano ${luaSnapshot.fields.size} pól • ${luaFetchedAt.take(19)} UTC. Poniżej bez domyślania jednostek.")
+                val technical = listOf(
+                    "Sprężarka — częstotliwość" to diagValue("compRunFreq", "comp_run_freq"),
+                    "Sprężarka — prąd" to diagValue("oduCompCurrent", "odu_comp_current"),
+                    "Woda — wejście Tw_in" to diagValue("tempTwin", "temp_tw_in"),
+                    "Woda — wyjście Tw_out" to diagValue("tempTwout", "temp_tw_out"),
+                    "Wymiennik T2" to diagValue("tempT2", "temp_t2"),
+                    "Wymiennik T2B" to diagValue("tempT2b", "temp_t2b"),
+                    "Wymiennik zewnętrzny T3" to diagValue("tempT3", "temp_t3"),
+                    "Temperatura tłoczenia TP" to diagValue("tempTp", "temp_tp"),
+                    "Zewnętrzna T4" to diagValue("tempT4", "temp_t4", "t4"),
+                    "Wysokie ciśnienie" to diagValue("pressureHigh", "pressure_high"),
+                    "Niskie ciśnienie" to diagValue("pressureLow", "pressure_low"),
+                    "Prędkość wentylatora" to diagValue("fanSpeed", "fan_speed"),
+                    "Zawór EXV" to diagValue("exvCurrent", "exv_current")
+                )
+                technical.forEach { (name, value) -> fieldRow(c, name, value, value == "—") }
+                caption(c, "— oznacza brak parametru, nie wartość zero. Ciśnienia i częstotliwości nie są zgadywane.")
+                spacing(c, 9)
+                action(c, "Eksportuj raport (z Lua 0x10)") { export(pump) }
+            }
+        }
         card(root) { c ->
-            title(c, "Wszystkie pola (${snapshot.fields.size})")
+            label(c, "Wszystkie odebrane pola: ${snapshot.fields.size}", 16, ink, true, 6)
+            caption(c, "Widok techniczny z mapowaniem pól do nazw. Zachowuje wartości surowe i klucze z chmury.")
+            spacing(c, 10)
+            action(c, "Eksportuj pełny JSON") { export(pump) }
+        }
+        card(root) { c ->
+            title(c, "Lista pól (${snapshot.fields.size})")
             caption(c, "Widoczne są również pola bez opisów i wartości zero. Dane prywatne zostały ukryte.")
             spacing(c, 11)
             val query = EditText(this).apply {
@@ -459,7 +613,7 @@ class MainActivity : Activity() {
             spacing(c, 6)
             caption(c, "Nie uruchamiamy Home Assistant. Nie korzystamy z Modbus, LAN ani dodatkowych modułów. Brak zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.3.0 • układ kafelków inspirowany Home Assistant")
+            caption(c, "Wersja 0.4.0 • interfejs Midea × kafelki Home Assistant")
         }
     }
 
@@ -471,7 +625,19 @@ class MainActivity : Activity() {
             source = "status/lua/get"
             fetchedAt = Instant.now().toString()
             rawX10 = ""; clearError()
-            feedback = "Odebrano ${snapshot.fields.size} pól • ${snapshot.recognized} opisanych • ${snapshot.unknown} nierozpoznanych."
+            feedback = ""
+            dashboard()
+        }, { error -> failedRead(error) })
+    }
+    private fun fetchLuaDiagnostic() {
+        val p = selected ?: return
+        if (!cooldown(true)) return
+        runTask("Pobieram parametry pracy Lua 0x10…", { cloud.unitDiagnosticsLua(p) }, { result ->
+            luaSnapshot = Telemetry.capture(result)
+            luaFetchedAt = Instant.now().toString()
+            clearError()
+            feedback = "Lua 0x10: odebrano ${luaSnapshot.fields.size} pól. Jeśli brakuje sprężarki, chmura nie przekazała diagnostyki."
+            tab = 1
             dashboard()
         }, { error -> failedRead(error) })
     }
@@ -534,12 +700,15 @@ class MainActivity : Activity() {
     }
     private fun export(p: Pump) {
         exportText = Telemetry.report(snapshot, source, fetchedAt, p.sn8,
-            lastCode, errorEndpoint, errorAt, rawX10).toString(2)
+            lastCode, errorEndpoint, errorAt, rawX10)
+            .put("luaUnitDiagnostics", luaSnapshot.values)
+            .put("luaUnitDiagnosticsFetchedAt", luaFetchedAt)
+            .put("luaUnitDiagnosticsFields", luaSnapshot.fields.size).toString(2)
         @Suppress("DEPRECATION")
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.3.json")
+            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.4.json")
         }, 10)
     }
     @Deprecated("Native activity result API")

@@ -15,7 +15,12 @@ internal object ReadPolicy {
         require(endpoint in setOf(ROUTE, LOGIN_ID, LOGIN, LIST, STATUS, RELAY)) { "Zablokowane żądanie" }
         if (endpoint == STATUS) {
             val command = body.getJSONObject("command")
-            require(command.length() == 1 && command.has("query") && command.getJSONObject("query").length() == 0)
+            require(command.length() == 1 && command.has("query"))
+            val query = command.getJSONObject("query")
+            require(query.length() == 0 ||
+                (query.length() == 1 && query.has("query_type") && query.optString("query_type") == "16")) {
+                "Dozwolone są wyłącznie odczyty: podstawowy oraz Lua 0x10"
+            }
         }
         if (endpoint == RELAY) require(frame != null && frame.contentEquals(C3.query())) { "Dozwolony tylko odczyt X10" }
     }

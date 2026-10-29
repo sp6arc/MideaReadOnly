@@ -81,7 +81,15 @@ internal class CloudClient(private val transport: ((String, Map<String,String>, 
             Pump(a.getString("id").toLong(), a.optString("name","Midea C3"), if (a.optString("sn").isNotEmpty()) Crypto.aes(Crypto.unhex(a.getString("sn")),key,iv,false).toString(Charsets.UTF_8) else "",a.optString("modelNumber","0"),a.optString("enterpriseCode","0000"),a.optString("onlineStatus")=="1")
         }
     }
-    fun status(p: Pump): JSONObject = request(ReadPolicy.STATUS,obj("clientType" to "1","appId" to "1010","format" to "2","deviceId" to device,"iotAppId" to "1010","applianceMFCode" to p.manufacturer,"applianceType" to "0xC3","modelNumber" to p.subtype,"applianceSn" to Crypto.fixedEncrypt(p.serial),"version" to "0","encryptedType " to "2","applianceCode" to p.id,"command" to obj("query" to JSONObject())))
+    private fun cloudQuery(p: Pump, query: JSONObject): JSONObject = request(ReadPolicy.STATUS,
+        obj("clientType" to "1","appId" to "1010","format" to "2","deviceId" to device,
+            "iotAppId" to "1010","applianceMFCode" to p.manufacturer,"applianceType" to "0xC3",
+            "modelNumber" to p.subtype,"applianceSn" to Crypto.fixedEncrypt(p.serial),"version" to "0",
+            "encryptedType " to "2","applianceCode" to p.id,"command" to obj("query" to query)))
+    fun status(p: Pump): JSONObject = cloudQuery(p, JSONObject())
+    /** Midea's 171H120F Lua defines query_type=16 (0x10) as read-only unit parameters.
+     * Whether the cloud will return it depends on the device/firmware; not a control command. */
+    fun unitDiagnosticsLua(p: Pump): JSONObject = cloudQuery(p, obj("query_type" to "16"))
     fun diagnostic(p: Pump): DiagnosticResult {
         val packet=C3.packet(p.id)
         val csv=packet.joinToString(",") { (it.toInt() and 255).toString() }
