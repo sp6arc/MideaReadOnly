@@ -323,9 +323,8 @@ def restore_archive(serialized):
                 merged.append(item)
         merged.sort(key=lambda item: item["at"])
         _history[:] = merged[-_max_history:]
-        for key, timestamp in archive.get("updatesAt",{}).items():
-            if isinstance(timestamp,str):
-                _changed_at.setdefault(key,timestamp)
+        # Do not restore update timestamps into live attribute state: upstream
+        # constructor defaults are not measurements. Prior data is in history.
     diagnostic_bridge.restore_archive(archive)
     _event("Przywrócono wcześniejszą historię i dekodowane ramki z pamięci telefonu")
     return "OK"
