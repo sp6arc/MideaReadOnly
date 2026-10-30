@@ -11,6 +11,13 @@ on:
       - 'settings.gradle.kts'
       - 'scripts/**'
       - '.github/workflows/build-android-apk.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'scripts/**'
+      - 'build.gradle.kts'
+      - '.github/workflows/build-android-apk.yml'
   workflow_dispatch:
 
 permissions:
