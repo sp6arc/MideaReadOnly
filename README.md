@@ -1,9 +1,141 @@
-# Midea ReadOnly 0.5.0 — Android Kotlin
+# MideaRemonte 2.4.1 — działanie z wygaszonym ekranem i zapamiętywanie konta
 
-Read-only Midea M-Thermal R32 (C3) monitoring through Midea SmartHome cloud **and**, independently, the factory Wi-Fi module on the same LAN.
+Wersja 2.4.1 naprawia dwa problemy aplikacji 2.4.0.
 
-Five screens: Panel, Chmura, Wi-Fi, Porównaj, Opcje. Supports encrypted local login persistence, C3 network discovery (UDP), private-IP manual connection, LAN V2/V3 read-only diagnostics and cloud-vs-LAN comparison. No Home Assistant, Modbus or extra hardware.
+- **Foreground Service (connectedDevice):** połączenie LAN i wątki oryginalnego
+  klienta Python działają w serwisie Android, a nie w ekranie aktywności.
+  Zniszczenie Activity nie zatrzymuje sesji. Usługa utrzymuje odblokowany CPU
+  (PARTIAL_WAKE_LOCK) oraz Wi-Fi (HIGH_PERF WifiLock) i ma widoczne
+  powiadomienie z przyciskiem zatrzymania.
+- **Automatyczne wznowienie:** po restarcie procesu system może wznowić
+  START_STICKY, jeżeli nie zostało użyte ręczne zatrzymanie, a dane konta
+  nadal istnieją. Jeśli telefon utraci Wi-Fi, monitor próbuje ponownie co
+  najmniej 120 sekund. Nie można zagwarantować działania po wymuszonym
+  zatrzymaniu aplikacji lub restarcie telefonu.
+- **Dane konta:** logowanie SmartHome, hasło oraz konfiguracja pompy są
+  szyfrowane AES-256-GCM kluczem AndroidKeyStore. Nie zapisujemy hasła w
+  zwykłych preferencjach ani nie dodajemy go do eksportu. Backup aplikacji
+  jest wyłączony. Jest przycisk usuwania zapisanej konfiguracji.
+- **Automatyczna historia:** raport JSON (w tym próbki, stemple czasu i
+  ograniczony zbiór surowych ramek 04-04/04-05) jest zapisywany atomowo
+  w prywatnym katalogu aplikacji co 30 sekund. Poprzedni zapis można
+  wyeksportować nawet przy wyłączonym monitoringu. Przy ponownym
+  połączeniu wcześniej zapisane próbki są przywracane.
+- **Instalacja bez konfliktu podpisów:** identyfikator nowej wersji to
+  `pl.zuza.midearemote.lua241`. Dzięki temu pakiet można zainstalować obok
+  2.4.0, nawet jeśli poprzedni APK miał inny podpis debug. Numer wersji: 241.
+  Dane trzeba wpisać raz w nowej aplikacji. Nie uruchamiać dwóch monitorów naraz.
 
-LAN telemetry is experimental, not confirmed against the user's specific physical device. TLS V4 and some Midea LAN auth restrictions may prevent diagnostic readings. Unknown values are never substituted or mislabelled. See `docs/ZMIANY_0.5_PL.md`.
+Nie dodajemy żadnych aktywnych testów X09/X10, poleceń SET ani wymagań
+Home Assistant / Modbus. Po wymuszonej interwencji oszczędzania baterii
+urządzenia Android mogą wyłączyć nawet usługę pierwszoplanową; w takim
+przypadku można zezwolić na nieograniczone działanie aplikacji w ustawieniach
+baterii telefonu. W 2.4.0 nie było zapisu hasła ani historii w pamięci
+trwałej; poprzednich niezapisanych danych nie da się odzyskać.
 
-Build APK: GitHub Actions workflow `build-android-apk.yml` or `./gradlew :app:assembleDebug` with Android SDK 35 and Java 17.
+**APK i pliki:** https://github.com/sp6arc/MideaReadOnly/releases/tag/v2.4.1-midearemonte
+
+---
+
+# MideaRemonte 2.4.0 — pasywna diagnostyka według oryginalnego Lua 171H120F
+
+Nowa gałąź projektu zachowuje całe działające połączenie Wi-Fi (oryginalne
+wuwentao/midea-lan, niezmieniony upstream) oraz poprzedni eksport pliku Lua.
+
+## Nowości 2.4.0
+
+- Pasywny dekoder odczytanych ramek 04-04, 04-05 i 03-10; żadne nowe
+  zapytania nie są wysyłane. X09 i X10 pozostają wyłączone.
+- Mapowanie bezpośrednio według Lua z chmury Midea JSON_VERSION=20,
+  SHA-256: 893adfc1122aff7eb58bcec21273c3719d68d60e5539a1f9cc3fc9be5722b0f5.
+- Obsługa sprężarki, temperatur, ciśnień, wentylatora, przepływu,
+  statusów i energii; z rozróżnieniem formatów 04-04 / 04-05 / 03-10.
+- Pokazujemy tylko pola z faktycznie odebranych bajtów i znacznik czasu
+  każdej wartości. Nie wymyślamy skalowania ciśnienia, mocy ani COP.
+- Bieżący licznik, długość i czas każdej odebranej rodziny ramek.
+- Zapis pełnego JSON przez systemowy wybór folderu. Eksport zawiera
+  do 30 ostatnich pełnych ramek 04-04 / 04-05 (hex) oraz ich parametry.
+  Nie eksportujemy pełnych ramek 03-10, które zawierają pola SN.
+- Testy Python dla ramek syntetycznych wykonywane w GitHub Actions
+  przed testami Kotlin i budowaniem APK.
+- Osobny identyfikator pakietu Android, więc wersja 2.4.0 może
+  współistnieć z 2.3.0. Nie uruchamiaj dwóch monitorów naraz.
+
+**Ważne:** schemat Lua oznacza, że dekoder wie, gdzie są pola, ale nie
+gwarantuje, że pompa emituje raport 04-05. Brak wartości w interfejsie
+oznacza brak zweryfikowanych bajtów z czujników, nie zero. Pełne dane
+eksportu mogą zawierać szczegóły techniczne systemu — przed publikacją
+publiczną należy je przejrzeć.
+
+## APK 2.4.0
+
+https://github.com/sp6arc/MideaReadOnly/releases/tag/v2.4.0-midearemonte
+
+# MideaRemonte 2.3.0 — działające protokoły + eksport oryginalnego Lua
+
+Projekt Android do monitorowania Midea M-Thermal R32, urządzenie typu C3,
+moduł Wi-Fi 171H120F. Zbudowany z oryginalnej, niemodyfikowanej biblioteki
+[wuwentao/midea-lan](https://github.com/wuwentao/midea-lan),
+commit `061df03f27a409bddaa5f5f50e371de5c00098b5`.
+
+## Co odczytujemy
+
+- X01 (03-01): cyklicznie ustawienia stref, CWU, stan włączenia, tryby i błędy
+- X05 (03-05): cyklicznie tryb cichy
+- X07 (03-07): cyklicznie ECO
+- 04-04 (spontaniczny raport): stan ogrzewania, temperatura zewnętrzna,
+  sumaryczne liczniki energii — **nie musi przychodzić cyklicznie**.
+- Cloud Lua: pobranie od Midea pliku protokołu przypisanego do C3.
+  Przycisk `Pobierz oryginalny plik Lua i ZAPISZ .lua` otwiera
+  systemowy dokumentowy dialog Android i kopiuje *dokładnie oryginalne bajty*
+  do wskazanego przez użytkownika folderu, np. Pobrane.
+  Zapis jest weryfikowany przez SHA-256 zgodne z pobranym plikiem.
+  Nie wykonujemy kodu Lua, nie dodajemy żadnych danych logowania.
+  **Sam Lua może zawierać identyfikatory protokołu lub dane producenta**;
+  przed publikacją publiczną warto go sprawdzić.
+  Zachowany przycisk metadanych: rozmiar/SHA256/model.
+
+## Wyłączone
+
+Znane nieodpowiadające X09 (dezynfekcja) i X10 (UnitPara) **nie są wysyłane**
+ani przy wstępnej autoryzacji, ani w odświeżaniu cyklicznym. Filtr
+`diagnostic_bridge.attach()` ogranicza `device.build_query()` do klas
+`MessageQueryBasic`, `MessageQuerySilence` i `MessageQueryECO`.
+Oryginalny `midealan/` pozostaje bez zmian (szyfrowanie, autoryzacja
+V3, dekodowanie, reconnect, heartbeat). Zapytanie identyfikacji urządzenia
+podczas handshaku pozostaje aktywne.
+
+Z aplikacji usunięto: 03-02-01 (ITS), strony 2F10/2F12, X08/X0A/X0D,
+ręczny X10 i 6-minutowy nasłuch diagnostyczny 04-05.
+Nie ma funkcji SET ani zmian konfiguracji urządzenia.
+
+## Gromadzenie danych
+
+W widoku głównym kafelki z ostatnimi odczytami i wiekiem ramki.
+Dane z 04-04 są oznaczone jako potencjalnie nieaktualne. Na ekranie
+widać liczniki i ostatni czas ramek 03-01/03-05/03-07/04-04.
+
+Eksport JSON zawiera:
+- ostatnie potwierdzone wartości i osobne znaczniki `updatesAt`;
+- do 800 ostatnich próbek dekodowanych odpowiedzi, z czasem i typem ramki;
+- statystyki ramek i metadane profilu Lua, jeśli odczytany;
+- brak haseł, tokenów, numerów seryjnych i pełnych ramek.
+
+Liczniki energii są przedstawiane **bez jednostki**, dopóki nie
+potwierdzimy skali i poprawności. `status_heating` to ostatni raport
+04-04, a nie dowód bieżącej pracy sprężarki.
+
+## Instalacja i budowa
+
+APK 2.3.0 ma osobny `applicationId=pl.zuza.midearemote.luaexport`,
+aby uniknąć konfliktów podpisu debugowego. Może współistnieć ze starą
+MideaRemonte 2.0.1 i TESTY 2.1.0. Starszą TESTY można odinstalować;
+nie uruchamiaj więcej niż jednego monitora naraz.
+
+```sh
+bash scripts/fetch-upstream.sh
+./gradlew :app:testDebugUnitTest :app:assembleDebug
+```
+
+W GitHub Actions wymagane są JDK 17, Python 3.12, Android SDK 35,
+Gradle i Chaquopy.

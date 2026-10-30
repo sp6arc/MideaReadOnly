@@ -1,24 +1,37 @@
-name: Midea ReadOnly — budowanie APK
+name: MideaRemonte 2.4.1 — background monitor and encrypted settings
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [midearemonte-python-upstream]
     paths:
       - 'app/**'
+      - 'README.md'
       - 'gradle/**'
       - 'gradlew'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
+      - 'scripts/**'
       - '.github/workflows/build-android-apk.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'scripts/**'
+      - 'build.gradle.kts'
+      - '.github/workflows/build-android-apk.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: midearemonte-2-4-1-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Java 17
@@ -26,27 +39,78 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Zainstaluj Android 35
+      - name: Python 3.12 for Chaquopy
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch exact upstream code without modifications
+        run: |
+          bash ./scripts/fetch-upstream.sh
+          python3.12 -m compileall -q app/src/main/python
+          sha256sum app/src/main/python/midealan/device.py
+      - name: Android 35
         run: |
           "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Zbuduj APK 0.7.1
+      - name: Tests and APK
         run: |
           chmod +x ./gradlew
+          PYTHONPATH=app/src/main/python python3.12 -m unittest -v test_lua_c3_decoder
           ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
-      - name: Kontrola pliku APK
+      - name: APK integrity / signature
         run: |
           test -s app/build/outputs/apk/debug/app-debug.apk
           unzip -t app/build/outputs/apk/debug/app-debug.apk | tail -1
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk
           sha256sum app/build/outputs/apk/debug/app-debug.apk
-      - name: Udostępnij APK
+      - name: Upload complete APK
         uses: actions/upload-artifact@v4
         with:
-          name: MideaReadOnly-0.7.1-debug-APK
+          name: MideaRemonte-2.4.1-BACKGROUND-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
 
+  publish-direct-download:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/midearemonte-python-upstream'
+    needs: build-debug-apk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK built and verified by read-only job
+        uses: actions/download-artifact@v4
+        with:
+          name: MideaRemonte-2.4.1-BACKGROUND-APK
+          path: release
+      - name: Prepare APK and ZIP
+        run: |
+          set -euo pipefail
+          test -s release/app-debug.apk
+          mv release/app-debug.apk release/MideaRemonte-2.4.1.apk
+          (cd release && zip -9 MideaRemonte-2.4.1-APK.zip MideaRemonte-2.4.1.apk)
+          sha256sum release/MideaRemonte-2.4.1.apk
+      - name: Publish public download links on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/midearemonte-python-upstream" --jq '.object.sha')"
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "Newer commit exists; do not publish this obsolete APK."
+            exit 0
+          fi
+          tag="v2.4.1-midearemonte"
+          if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" \
+              --target midearemonte-python-upstream \
+              --title "MideaRemonte 2.4.1 – always-on foreground monitor with encrypted credentials" \
+              --notes "APK for Android with the original, unchanged wuwentao/midea-lan (2026.10.0) engine. Read-only interface. Only the verified X01/X05/X07 LAN polls and passive 04-04 energy messages, plus original cloud Lua file export via Android Save As and time-stamped history. X09/X10 and all experimental probes removed. The original upstream Python remains unmodified. Adds passive source-Lua decoding, bounded full-frame export, an Android connectedDevice foreground service, CPU/Wi-Fi locks, Android Keystore encrypted saved login, 30-second private autosave and local recovery. No X10 probes. Debug-signed prerelease; actual device compatibility not guaranteed." \
+              --prerelease
+          fi
+          gh release upload "$tag" \
+            release/MideaRemonte-2.4.1.apk \
+            release/MideaRemonte-2.4.1-APK.zip \
+            -R "$GITHUB_REPOSITORY" --clobber

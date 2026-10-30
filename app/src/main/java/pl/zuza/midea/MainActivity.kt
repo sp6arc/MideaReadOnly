@@ -1,996 +1,657 @@
 package pl.zuza.midea
 
 import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import java.io.File
+import java.security.MessageDigest
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Bundle
-import android.os.SystemClock
-import android.text.Editable
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
-import android.text.TextWatcher
-import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONArray
 import org.json.JSONObject
-import java.time.Instant
+import java.time.Duration
+import java.time.OffsetDateTime
 import java.util.concurrent.Executors
 
-/** Offline-dependency-free Android UI inspired by Home Assistant's sections and tiles.
- * It DOES NOT connect to Home Assistant; all Midea requests are read-only HTTPS. */
+/**
+ * MideaRemonte 2.4.1: foreground monitor, encrypted login, durable capture.
+ * Original wuwentao/midea-lan transport, V3 authentication and decoder.
+ * Only X01, X05 and X07 polls; passive X04 energy notifications.
+ */
 class MainActivity : Activity() {
-    private val executor = Executors.newSingleThreadExecutor()
-    private val cloud = CloudClient()
-    private lateinit var secrets: SecretsStore
-    private lateinit var root: LinearLayout
-    private lateinit var statusText: TextView
-    private var busy = false
-    private var selected: Pump? = null
-    private var devices = listOf<Pump>()
-    private var snapshot = Telemetry.capture(JSONObject())
-    private var source = "brak"
-    private var fetchedAt = ""
-    private var rawX10 = ""
-    private var luaSnapshot = Telemetry.capture(JSONObject())
-    private var luaFetchedAt = ""
-    private var lastCode: Int? = null
-    private var errorEndpoint: String? = null
-    private var errorAt = ""
-    private var feedback = ""
-    private var lastStatus = -60_000L
-    private var lastDiagnostic = -60_000L
-    private var exportText = ""
-    private var currentAccount = ""
-    private var savedPassword = ""
-    private var rememberLogin = true
-    private var rememberedPumpId: Long? = null
-    private var tab = 0 // 0 panel, 1 cloud, 2 Wi-Fi, 3 comparison, 4 settings
-    private var localPump: LanPump? = null
-    private var lanDiscoveries = emptyList<LanPump>()
-    private var lanSnapshot = Telemetry.capture(JSONObject())
-    private var lanFetchedAt = ""
-    private var lanRawX10 = ""
-    private var lanFrames = emptyList<LanFrame>()
-    private var lanResultType = "brak"
-    private val lanCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
-    private var lanSources = emptyMap<String,String>()
-    private var lanTimes = emptyMap<String,String>()
-    private var lanStopButton: android.widget.Button? = null
-    private var lanSteps = listOf<String>()
-    private var lanStatus = "Nie testowano połączenia Wi-Fi"
-    private var cloudChecks = mutableListOf<String>()
-    private var lastWifiIp = ""
-    private var localProtocol = 3
-    private var lastWifiRead = -60_000L
+    private val work = Executors.newSingleThreadExecutor()
+    private val statusWork = Executors.newSingleThreadExecutor()
+    private val handler = Handler(Looper.getMainLooper())
+    private val tiles = mutableMapOf<String, Pair<TextView,TextView>>()
+    private lateinit var state: TextView
+    private lateinit var version: TextView
+    private lateinit var values: TextView
+    private lateinit var events: TextView
+    private lateinit var frames: TextView
+    private lateinit var cloudResult: TextView
+    private lateinit var luaValues: TextView
+    private lateinit var counters: TextView
+    private lateinit var host: EditText
+    private lateinit var port: EditText
+    private lateinit var id: EditText
+    private lateinit var model: EditText
+    private lateinit var proto: EditText
+    private lateinit var account: EditText
+    private lateinit var password: EditText
+    private lateinit var cloud: Spinner
+    private lateinit var found: Spinner
+    private var pumpList = JSONArray()
+    private val requestSaveLua = 2301
+    private val requestSaveDiagnostics = 2402
+    private var pendingDiagnosticsJson: String? = null
+    @Volatile private var luaDownloadInProgress = false
+    private var pendingLuaPath: String? = null
+    private var pendingLuaHash: String? = null
+    private var luaSavedName: String? = null
+    private var active = true
+    private var refreshing = false
+    private var wifiNetwork: Network? = null
+    private var wifiLock: WifiManager.MulticastLock? = null
 
-    private var onlyUnknown = false
-    private var searchQuery = ""
-
-    private val ink = Color.rgb(28, 46, 62)
-    private val muted = Color.rgb(105, 121, 136)
-    private val blue = Color.rgb(28, 119, 203)
-    private val bluePale = Color.rgb(229, 241, 253)
-    private val background = Color.rgb(245, 247, 250)
-    private val warning = Color.rgb(166, 68, 38)
-    private val white = Color.WHITE
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) // screenshots always enabled
-        window.statusBarColor = background
-        window.navigationBarColor = background
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-        secrets = SecretsStore(this)
-        val saved = secrets.load()
-        if (saved == null) loginScreen()
-        else {
-            currentAccount = saved.account
-            savedPassword = saved.password
-            rememberLogin = true
-            rememberedPumpId = saved.pumpId
-            baseScreen("Midea M-Thermal", "Przywracanie połączenia SmartHome")
-            card(root) { c -> caption(c, "Zapisane konto jest szyfrowane lokalnie. Łączenie z Midea…") }
-            connect(saved.account, saved.password, true, saved.pumpId, auto = true)
+    private val ink = Color.rgb(24, 40, 60)
+    private val muted = Color.rgb(92, 108, 128)
+    private val accent = Color.rgb(30, 105, 175)
+    private fun px(v:Int) = (resources.displayMetrics.density*v+0.5f).toInt()
+    private fun shape(color:Int,radius:Int) = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius=px(radius).toFloat()
+    }
+    private fun label(root:LinearLayout, text:String, size:Float=13f, bold:Boolean=false):TextView {
+        val v=TextView(this)
+        v.text=text
+        v.textSize=size
+        v.setTextColor(if(bold) ink else muted)
+        if(bold)v.setTypeface(null,Typeface.BOLD)
+        v.setTextIsSelectable(true)
+        v.setPadding(0,px(4),0,px(4))
+        root.addView(v)
+        return v
+    }
+    private fun heading(root:LinearLayout, text:String) {
+        val v=label(root,text,18f,true)
+        v.setPadding(0,px(24),0,px(10))
+    }
+    private fun field(root:LinearLayout, hint:String, initial:String,
+                      inputMode:Int=InputType.TYPE_CLASS_TEXT):EditText {
+        val v=EditText(this)
+        v.hint=hint
+        v.setSingleLine(true)
+        v.setText(initial)
+        v.inputType=inputMode
+        v.textSize=14f
+        root.addView(v,LinearLayout.LayoutParams(-1,px(50)))
+        return v
+    }
+    private fun button(root:LinearLayout, title:String, action:()->Unit) {
+        val v=Button(this)
+        v.text=title
+        v.isAllCaps=false
+        v.setOnClickListener{action()}
+        root.addView(v,LinearLayout.LayoutParams(-1,px(50)))
+    }
+    private fun tile(root:LinearLayout, title:String, key:String) {
+        val card=LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL
+            setPadding(px(14),px(12),px(12),px(12))
+            background=shape(Color.WHITE,14)
+            elevation=px(2).toFloat()
         }
+        val titleView=label(card,title,12f)
+        titleView.setTextColor(muted)
+        val value=label(card,"—",22f,true)
+        value.setTextColor(accent)
+        val subtitle=label(card,"Brak odebranej ramki",11f)
+        tiles[key]=value to subtitle
+        val p=LinearLayout.LayoutParams(0,px(116),1f)
+        p.setMargins(px(3),px(5),px(3),px(5))
+        root.addView(card,p)
     }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + .5f).toInt()
-    private fun shape(color: Int, radius: Int = 18, borderColor: Int? = null): GradientDrawable = GradientDrawable().apply {
-        setColor(color); cornerRadius = dp(radius).toFloat()
-        if (borderColor != null) setStroke(dp(1), borderColor)
-    }
-    private fun spacing(parent: LinearLayout, h: Int = 12) {
-        parent.addView(View(this), LinearLayout.LayoutParams(1, dp(h)))
-    }
-    private fun label(parent: LinearLayout, value: String, size: Int = 16, color: Int = ink,
-                      bold: Boolean = false, padBottom: Int = 0): TextView = TextView(this).apply {
-        text = value
-        textSize = size.toFloat()
-        setTextColor(color)
-        if (bold) setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-        setPadding(0, 0, 0, dp(padBottom))
-        setTextIsSelectable(true)
-        parent.addView(this)
-    }
-    private fun caption(parent: LinearLayout, value: String) = label(parent, value, 13, muted)
-    private fun title(parent: LinearLayout, value: String) { label(parent, value, 19, ink, true, 10) }
-
-    private fun card(host: LinearLayout, paint: Int = white, content: (LinearLayout) -> Unit): LinearLayout {
-        val holder = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = shape(paint)
-            elevation = dp(1).toFloat()
-        }
-        val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        p.bottomMargin = dp(12)
-        host.addView(holder, p)
-        content(holder)
-        return holder
-    }
-    private fun action(parent: LinearLayout, value: String, primary: Boolean = false,
-                       destructive: Boolean = false, onClick: () -> Unit): TextView {
-        val view = TextView(this).apply {
-            text = value
-            textSize = 14f
-            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            minimumHeight = dp(48)
-            setTextColor(if (primary) white else if (destructive) warning else blue)
-            background = shape(if (primary) blue else if (destructive) Color.rgb(255, 240, 235) else bluePale, 13)
-            isClickable = !busy
-            alpha = if (busy) 0.6f else 1f
-            setOnClickListener { if (!busy) onClick() }
-        }
-        parent.addView(view, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        return view
-    }
-    private fun twoActions(parent: LinearLayout, left: String, right: String, l: () -> Unit, r: () -> Unit) {
-        val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        parent.addView(line)
-        val a = action(line, left, true, onClick = l)
-        val b = action(line, right, onClick = r)
-        a.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(7) }
-        b.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(7) }
-    }
-    private fun baseScreen(head: String, sub: String) {
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(this@MainActivity.background)
-            fitsSystemWindows = true
-            clipToPadding = false
-            isFillViewport = true
-        }
-        root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(17), dp(24), dp(17), dp(30))
-        }
-        scroll.addView(root)
-        setContentView(scroll)
-        label(root, "MIDEA  •  MONITOR", 12, blue, true, 8)
-        label(root, head, 27, ink, true, 6)
-        caption(root, sub)
-        spacing(root, 16)
-        statusText = label(root, feedback, 13, if (lastCode == null) muted else warning)
-        if (feedback.isNotBlank()) spacing(root, 9)
-    }
-
-    private fun loginScreen(account: String = "", password: String = "", message: String = "") {
-        selected = null
-        devices = emptyList()
-        feedback = message
-        lastCode = null
-        baseScreen("Twoja pompa ciepła", "Chmura Midea SmartHome • oryginalny moduł Wi-Fi • tylko odczyt")
-        card(root) { c ->
-            title(c, "Zaloguj się")
-            caption(c, "Konto SmartHome, na którym jest zarejestrowana pompa.")
-            spacing(c, 12)
-            val email = EditText(this).apply {
-                hint = "E-mail / login SmartHome"; setText(account)
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
-                textSize = 16f; isSingleLine = true
-            }
-            val pass = EditText(this).apply {
-                hint = "Hasło"; setText(password)
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                textSize = 16f; isSingleLine = true
-            }
-            c.addView(email); c.addView(pass)
-            val remember = CheckBox(this).apply {
-                text = "Zapamiętaj konto i wybraną pompę"
-                textSize = 14f; isChecked = rememberLogin
-                setTextColor(ink)
-            }
-            c.addView(remember)
-            caption(c, "Hasło zapisuje się wyłącznie po udanym logowaniu, zaszyfrowane przez Android Keystore.")
-            spacing(c, 10)
-            action(c, "Połącz z Midea", primary = true) {
-                val user = email.text.toString().trim()
-                val secret = pass.text.toString()
-                if (user.isBlank() || secret.isBlank()) {
-                    statusText.text = "Wpisz login oraz hasło."; return@action
-                }
-                val previousPump = if (user == currentAccount) rememberedPumpId else null
-                connect(user, secret, remember.isChecked, previousPump, auto = false)
-            }
-        }
-        card(root, bluePale) { c ->
-            title(c, "Co otrzymasz?")
-            label(c, "• Panel parametrów na wzór Home Assistant", 14)
-            label(c, "• Dostęp do wszystkich odebranych pól", 14)
-            label(c, "• Zrzuty ekranu i eksport JSON", 14)
-            label(c, "• Brak poleceń sterujących", 14)
-        }
-    }
-
-    private fun connect(account: String, password: String, remember: Boolean, preferred: Long?, auto: Boolean) {
-        runTask("Łączenie z kontem SmartHome…", {
-            try {
-                cloud.login(account, password)
-                cloud.pumps()
-            } catch (e: Exception) { cloud.clear(); throw e }
-        }, { found ->
-            devices = found
-            currentAccount = account
-            rememberLogin = remember
-            rememberedPumpId = preferred
-            savedPassword = if (remember) password else ""
-            if (remember) {
-                try { secrets.save(SavedLogin(account, password, preferred)) }
-                catch (_: Exception) { feedback = "Połączono, ale nie udało się bezpiecznie zapisać logowania." }
-            } else secrets.forget()
-            if (devices.isEmpty()) {
-                loginScreen(account, "", "Konto działa, ale nie znaleziono urządzenia C3.")
-            } else {
-                val chosen = devices.firstOrNull { it.id == preferred } ?: devices.singleOrNull()
-                if (chosen == null) chooseScreen() else choose(chosen, initialRead = true)
-            }
-        }, { error ->
-            // Do not delete saved credentials on transient network failures.
-            val msg = errorMessage(error)
-            loginScreen(account, if (auto) password else "", msg)
-        })
-    }
-
-    private fun chooseScreen() {
-        feedback = ""
-        baseScreen("Wybierz pompę", "Urządzenia Midea C3 przypisane do Twojego konta")
-        devices.forEach { p ->
-            card(root) { c ->
-                label(c, p.name, 19, ink, true, 5)
-                caption(c, "Profil: ${p.sn8}  •  Status z listy: ${if (p.online) "online" else "offline"}")
-                spacing(c, 12)
-                action(c, "Otwórz panel pompy") { choose(p, initialRead = true) }
-            }
-        }
-        card(root) { c -> action(c, "Wyloguj i zapomnij dane", destructive = true) { logout() } }
-    }
-
-    private fun choose(p: Pump, initialRead: Boolean) {
-        selected = p
-        snapshot = Telemetry.capture(JSONObject())
-        source = "brak"; fetchedAt = ""; rawX10 = ""
-        luaSnapshot = Telemetry.capture(JSONObject()); luaFetchedAt = ""
-        lanSnapshot = Telemetry.capture(JSONObject());lanFetchedAt = "";lanRawX10="";lanSteps=emptyList()
-        lanDiscoveries=emptyList();localPump=null;lanStatus="Nie testowano połączenia Wi-Fi";lanFrames=emptyList();lanResultType="brak"
-        cloudChecks.clear()
-        lastCode = null; errorEndpoint = null; errorAt = ""; feedback = ""
-        lastStatus = -60_000L; lastDiagnostic = -60_000L;lastWifiRead=-60_000L
-        onlyUnknown = false; searchQuery = ""; tab = 0
-        rememberedPumpId = p.id
-        if (rememberLogin && savedPassword.isNotBlank()) {
-            try { secrets.save(SavedLogin(currentAccount, savedPassword, p.id)) }
-            catch (_: Exception) { feedback = "Wybrano pompę, ale nie zapisano wyboru na urządzeniu." }
-        }
-        dashboard()
-        if (initialRead) fetchStatus()
-    }
-
-    private fun cloudValue(key: String): String? = snapshot.values.optString(key, "").takeIf { it.isNotBlank() }
-    private fun temp(key: String): String = cloudValue(key)?.let { v ->
-        if (v.matches(Regex("-?[0-9]+([.][0-9]+)?"))) "$v °C" else "—"
-    } ?: "—"
-    private fun diagValue(vararg keys: String): String = keys.firstNotNullOfOrNull { name ->
-        luaSnapshot.values.optString(name, "").takeIf { it.isNotBlank() }
-    } ?: "—"
-    private fun state(key: String): String = when (cloudValue(key)?.lowercase()) {
-        "on" -> "Włączone"
-        "off" -> "Wyłączone"
-        else -> "Nieznane"
-    }
-    private fun modeName(): String = when (cloudValue("run_mode_set")) {
-        "heat" -> "OGRZEWANIE"
-        "cool" -> "CHŁODZENIE"
-        "auto" -> "AUTO"
-        else -> "TRYB NIEZNANY"
-    }
-    private fun fieldRow(parent: LinearLayout, name: String, value: String, dim: Boolean = false) {
-        val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        parent.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
-        label(line, name, 13, muted).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f) }
-        label(line, value, 14, if (dim) muted else ink, true)
-    }
-    private fun metricTile(host: LinearLayout, heading: String, value: String, footer: String, accent: Int = blue) {
-        val tile = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(13), dp(15), dp(11), dp(14))
-            minimumHeight = dp(125)
-            background = shape(white, 18)
-            elevation = dp(1).toFloat()
-        }
-        host.addView(tile, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(4); rightMargin = dp(4); bottomMargin = dp(8) })
-        label(tile, heading, 12, muted, false, 9)
-        label(tile, value, 24, accent, true, 6)
-        label(tile, footer, 11, muted)
-    }
-    private fun metricPair(firstName: String, firstValue: String, firstNote: String,
-                           secondName: String, secondValue: String, secondNote: String,
-                           firstAccent: Int = blue, secondAccent: Int = blue) {
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+    private fun tileRow(root:LinearLayout, a:Pair<String,String>, b:Pair<String,String>) {
+        val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
         root.addView(row)
-        metricTile(row, firstName, firstValue, firstNote, firstAccent)
-        metricTile(row, secondName, secondValue, secondNote, secondAccent)
-    }
-    private fun section(name: String, subtitle: String = "") {
-        spacing(root, 13)
-        label(root, name, 19, ink, true, 6)
-        if (subtitle.isNotBlank()) caption(root, subtitle)
-        spacing(root, 8)
-    }
-    private fun hero(pump: Pump) {
-        val deep = Color.rgb(10, 78, 151)
-        val pale = Color.rgb(209, 237, 255)
-        val holder = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(20), dp(20), dp(20))
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(Color.rgb(13, 124, 200), deep)).apply { cornerRadius = dp(25).toFloat() }
-            elevation = dp(3).toFloat()
-        }
-        root.addView(holder, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(15) })
-        label(holder, "M-THERMAL   R32   •   ${pump.sn8}", 12, pale, true, 10)
-        label(holder, modeName(), 26, white, true, 5)
-        label(holder, if(lanSnapshot.values.has("comp_run_freq")) {
-            "Sprężarka: ${lanSnapshot.values.optInt("comp_run_freq")} Hz · odczyt Wi-Fi"
-        } else "Tryb wybrany na sterowniku, nie potwierdzenie pracy sprężarki", 11, pale)
-        spacing(holder, 18)
-        val mainRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        holder.addView(mainRow)
-        val target = temp("zone1_temp_set")
-        val circle = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(Color.argb(20,255,255,255))
-                setStroke(dp(3), Color.argb(175,255,255,255))
-            }
-        }
-        mainRow.addView(circle, LinearLayout.LayoutParams(dp(158), dp(158)))
-        label(circle, "ZADANA · OBIEG 1", 10, pale, true, 6)
-        label(circle, target, if (target.length > 6) 31 else 35, white, true)
-        val side = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, 0, 0)
-        }
-        mainRow.addView(side, LinearLayout.LayoutParams(0, -2, 1f))
-        label(side, "●  ${if (pump.online) "ONLINE" else "OFFLINE"}", 12, pale, true, 9)
-        label(side, "Obieg 1", 12, pale)
-        label(side, state("zone1_power_state"), 17, white, true, 11)
-        label(side, "CWU", 12, pale)
-        label(side, state("dhw_power_state"), 17, white, true)
-        spacing(holder, 17)
-        val foot = "Odczyt: " + (if (fetchedAt.isBlank()) "brak" else fetchedAt.replace('T', ' ').take(19) + " UTC")
-        label(holder, foot, 12, pale)
+        tile(row,a.first,a.second)
+        tile(row,b.first,b.second)
     }
 
-    private fun dashboard() {
-        val pump = selected ?: return
-        baseScreen(pump.name, "Twoja pompa ciepła  •  Midea SmartHome  •  tylko podgląd")
-        hero(pump)
-        val tabs = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(3), dp(3), dp(3), dp(3))
-            background = shape(Color.rgb(231, 238, 246), 16)
+    override fun onCreate(savedInstanceState:Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        val outer=LinearLayout(this).apply{
+            orientation=LinearLayout.VERTICAL
+            setPadding(px(16),px(16),px(16),px(28))
+            setBackgroundColor(Color.rgb(245,248,253))
         }
-        val tabScroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false;addView(tabs) }
-        root.addView(tabScroll, LinearLayout.LayoutParams(-1, dp(54)))
-        listOf("Panel", "Chmura", "Wi-Fi", "Porównaj", "Opcje").forEachIndexed { index, name ->
-            val cell = TextView(this).apply {
-                text = name
-                textSize = 13f
-                gravity = Gravity.CENTER
-                setTypeface(Typeface.DEFAULT, if (tab == index) Typeface.BOLD else Typeface.NORMAL)
-                setTextColor(if (tab == index) blue else muted)
-                background = shape(if (tab == index) white else Color.TRANSPARENT, 13)
-                setOnClickListener { if (!busy) { tab = index; dashboard() } }
+        val scroll=ScrollView(this).apply{isFillViewport=true}
+        scroll.addView(outer)
+        setContentView(scroll)
+        val brand=label(outer,"MideaRemonte 2.4.1",24f,true)
+        brand.setTextColor(accent)
+        label(outer,"MONITORING POTWIERDZONYCH ODCZYTÓW • TYLKO ODCZYT",11f)
+        version=label(outer,"Ładowanie biblioteki Midea…",12f)
+        state=label(outer,"Oczekiwanie na połączenie",14f,true)
+
+        heading(outer,"Bieżące dane pompy")
+        label(outer,"Wartości z X01/X05/X07 odświeżają się cyklicznie. Dane 04-04 są pokazywane z czasem ostatniego raportu.",12f)
+        tileRow(outer,"Ogrzewanie" to "status_heating","Temperatura zewnętrzna" to "outdoor_temperature")
+        tileRow(outer,"Strefa 1 — zadana" to "zone1_target","Tryb pompy" to "mode")
+        tileRow(outer,"Energia pobrana¹" to "total_energy_consumption","Energia oddana¹" to "total_produced_energy")
+        tileRow(outer,"Tryb cichy" to "silent_level","Tryb ECO" to "eco_function_state")
+        tileRow(outer,"Błąd sterownika" to "error_code","Strefa 1" to "zone1_power")
+        label(outer,"¹ Surowe liczniki z 04-04. Jednostki i skala nie są jeszcze zweryfikowane; nie obliczamy COP.",11f)
+        counters=label(outer,"Odebrane pola: 0 · Historia: 0 próbek",13f,true)
+
+        heading(outer,"Diagnostyka serwisowa z Lua — pasywny odczyt")
+        label(outer,"Źródło: oryginalny Lua 171H120F. Raporty 04-04 i 04-05 tylko odbieramy; nie wysyłamy nowych poleceń. Wartości surowe, jeśli jednostka nie została potwierdzona.",12f)
+        tileRow(outer,"Sprężarka (raw)" to "compRunFreq","Wentylator (x10)" to "fanSpeed")
+        tileRow(outer,"Woda wejście" to "tempTwin","Woda wyjście" to "tempTwout")
+        tileRow(outer,"Ciśnienie wysokie (raw)" to "pressureHigh","Ciśnienie niskie (raw)" to "pressureLow")
+        tileRow(outer,"Pobór chwilowy (raw)" to "SysInstantPower","COP/EER (raw)" to "SysInstantCopEER")
+        tileRow(outer,"Odszranianie" to "fgDefrost","Przepływ wody (raw)" to "waterFlow")
+        heading(outer,"Połączenie z pompą")
+        host=field(outer,"IP pompy (puste = wykryj)", "")
+        button(outer,"Wykryj pompę przez Wi-Fi"){discover()}
+        found=Spinner(this)
+        outer.addView(found)
+        found.onItemSelectedListener=object:android.widget.AdapterView.OnItemSelectedListener{
+            override fun onNothingSelected(parent:android.widget.AdapterView<*>?){}
+            override fun onItemSelected(parent:android.widget.AdapterView<*>?,view:View?,position:Int,itemId:Long){
+                val d=pumpList.optJSONObject(position)?:return
+                host.setText(d.optString("host"))
+                port.setText(d.optString("port"))
+                id.setText(d.optString("id"))
+                model.setText(d.optString("model"))
+                proto.setText(d.optString("protocol"))
             }
-            tabs.addView(cell, LinearLayout.LayoutParams(dp(87), -1))
         }
-        spacing(root, 12)
-        if (lastCode != null) {
-            card(root, Color.rgb(255, 241, 236)) { c ->
-                label(c, "Diagnostyka chmury: $lastCode", 15, warning, true, 4)
-                label(c, "Błąd zapytania ${errorEndpoint ?: "API"}. Nie jest to kod awarii pompy.", 12, warning)
-                if (tab == 1) caption(c, "Ostatni poprawny odczyt pozostaje dostępny. $errorAt")
+        port=field(outer,"Port TCP", "6444",InputType.TYPE_CLASS_NUMBER)
+        id=field(outer,"Device ID", "",InputType.TYPE_CLASS_NUMBER)
+        model=field(outer,"Model z wykrywania (171H120F)", "")
+        proto=field(outer,"Transport (2 lub 3)", "3",InputType.TYPE_CLASS_NUMBER)
+        cloud=Spinner(this)
+        outer.addView(cloud)
+        cloud.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,
+            arrayOf("SmartHome","美的美居","Midea Air","NetHome Plus","Ariston Clima","TSmartLife","Toshiba Iolife"))
+        account=field(outer,"Login chmury", "")
+        password=field(outer,"Hasło chmury", "",
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+        restoreSavedSettings()
+        label(outer,"Dane połączenia zapisujemy zaszyfrowane w magazynie kluczy Androida. Po zgaszeniu ekranu monitor nadal działa jako usługa z powiadomieniem. Jeśli system całkowicie wymusi zatrzymanie aplikacji, zapisane próbki pozostaną na telefonie.",12f)
+        button(outer,"Uruchom monitoring w tle (X01 / X05 / X07)"){startMonitor()}
+        button(outer,"Zatrzymaj monitoring"){stopMonitor()}
+        button(outer,"Usuń zapisane dane logowania"){clearSavedSettings()}
+        label(outer,"Nie wysyłamy X09, X10, protokołu ITS ani zapytań eksperymentalnych. Nie zmieniamy ustawień pompy.",12f)
+
+        heading(outer,"Raporty odebrane przez Wi-Fi")
+        frames=label(outer,"Oczekiwanie na ramki X01/X05/X07 i 04-04…",13f)
+        heading(outer,"Plik protokołu Lua z chmury")
+        label(outer,"Można pobrać profil dla 171H120F. To metadane protokołu, nie odczyt temperatur na żywo.",12f)
+        button(outer,"Sprawdź profil Lua (rozmiar i SHA)"){cloudProfile()}
+        button(outer,"Pobierz oryginalny plik Lua i ZAPISZ .lua"){downloadLuaAndSave()}
+        label(outer,"Po zapisaniu pliku wybierz w ChatGPT: + → Pliki → wybierz .lua. Pobieramy oryginalny plik bez zmian; nie uruchamiamy jego kodu.",12f)
+        cloudResult=label(outer,"Nie sprawdzono pliku Lua",13f)
+
+        heading(outer,"Pola dekodowane na podstawie Lua")
+        luaValues=label(outer,"Brak pasywnej ramki 04-04 / 04-05 / 03-10",12f)
+        heading(outer,"Wszystkie odebrane pola")
+        values=label(outer,"Brak danych",12f)
+        heading(outer,"Historia i eksport")
+        button(outer,"ZAPISZ diagnostykę Lua + surowe ramki (JSON)"){export()}
+        label(outer,"Monitoring zapisuje dane lokalnie co 30 sekund. Eksport działa również po zamknięciu usługi, używając ostatniego automatycznego zapisu.",12f)
+        label(outer,"Eksportuje do pliku JSON: dane, ostatnie 800 próbek i pełne bajty odebranych ramek 04-04/04-05 (maks. 30). Ramki 03-10 z numerami seryjnymi nie są eksportowane. Przed publicznym udostępnieniem sprawdź plik.",12f)
+        heading(outer,"Zdarzenia")
+        events=label(outer,"Brak zdarzeń",11f)
+
+        job("Weryfikacja biblioteki Python"){
+            val self=JSONObject(getPython().getModule("midea_bridge").callAttr("selfcheck").toString())
+            onUI{
+                version.text="wuwentao/midea-lan " + self.optString("version") +
+                    " • zapytania X01/X05/X07 • odbiór 04-04"
+                state.text="Silnik załadowany; monitoring nieuruchomiony"
             }
-        }
-        when (tab) {
-            0 -> overview(pump)
-            1 -> rawData(pump)
-            2 -> wifiTab(pump)
-            3 -> comparisonTab(pump)
-            else -> settings(pump)
-        }
-        if (feedback.isNotBlank()) {
-            statusText.text = feedback
-            statusText.setTextColor(if (lastCode == null) muted else warning)
         }
     }
 
-    private fun overview(pump: Pump) {
-        if (snapshot.fields.isEmpty()) {
-            card(root) { c ->
-                title(c, "Brak odczytów")
-                caption(c, "Odczyt SmartHome zostanie pobrany po połączeniu.")
-                spacing(c, 12)
-                action(c, "↻  Pobierz dane", primary = true) { fetchStatus() }
+    override fun onResume(){
+        super.onResume()
+        handler.removeCallbacks(tick)
+        handler.postDelayed(tick,1000)
+    }
+
+    override fun onStop(){
+        handler.removeCallbacks(tick)
+        super.onStop()
+    }
+
+    private fun getPython():Python=PythonEngine.get(this)
+    private fun onUI(action:()->Unit){runOnUiThread{if(active)action()}}
+    private fun job(name:String,action:()->Unit){
+        state.text=name
+        work.execute{
+            try{action()}catch(ex:Exception){
+                val message=ex.message?.take(200)?:ex.javaClass.simpleName
+                onUI{
+                    state.text="Błąd: $message"
+                    Toast.makeText(this,message,Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+    private fun bindWifi(){
+        val connectivity=getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        wifiNetwork=connectivity.allNetworks.firstOrNull{
+            connectivity.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true
+        }
+        requireNotNull(wifiNetwork){"Telefon musi być połączony przez Wi-Fi z siecią pompy"}
+        @Suppress("DEPRECATION")
+        connectivity.bindProcessToNetwork(wifiNetwork)
+    }
+    private fun discover(){
+        val ip=host.text.toString().trim()
+        job("Wykrywanie urządzeń C3"){
+            bindWifi()
+            val wifi=getSystemService(WIFI_SERVICE) as WifiManager
+            val lock=wifi.createMulticastLock("midearemonte-monitor").apply{setReferenceCounted(false)}
+            wifiLock=lock
+            lock.acquire()
+            try{
+                val result=JSONArray(getPython().getModule("midea_bridge").callAttr("scan",ip).toString())
+                onUI{
+                    pumpList=result
+                    val names=(0 until result.length()).map{
+                        val d=result.getJSONObject(it)
+                        d.optString("host")+":"+d.optString("port")+" • "+d.optString("model")
+                    }
+                    found.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,names)
+                    state.text="Znaleziono pomp C3: "+result.length()
+                }
+            }finally{
+                if(lock.isHeld)lock.release()
+                wifiLock=null
+            }
+        }
+    }
+    private fun restoreSavedSettings(){
+        try {
+            val cfg=SecurePumpSettings.load(this)?:return
+            host.setText(cfg.host)
+            port.setText(cfg.port)
+            id.setText(cfg.deviceId)
+            model.setText(cfg.model)
+            proto.setText(cfg.protocol)
+            account.setText(cfg.username)
+            password.setText(cfg.password)
+            for(i in 0 until cloud.count){
+                if(cloud.getItemAtPosition(i).toString()==cfg.cloud){
+                    cloud.setSelection(i)
+                    break
+                }
+            }
+            state.text=if(SecurePumpSettings.enabled(this))
+                "Przywrócono dane • usługa monitoringu była aktywna"
+                else "Przywrócono zapisane dane połączenia"
+        }catch(_:Exception){
+            state.text="Zapisane dane logowania nie mogą zostać odszyfrowane; wpisz je ponownie"
+        }
+    }
+
+    private fun clearSavedSettings(){
+        stopMonitor()
+        SecurePumpSettings.clear(this)
+        account.setText("")
+        password.setText("")
+        state.text="Zapisane konto i konfiguracja usunięte z pamięci telefonu"
+    }
+
+    private fun startMonitor(){
+        val h=host.text.toString().trim()
+        val p=port.text.toString().trim()
+        val devId=id.text.toString().trim()
+        val m=model.text.toString().trim()
+        val pr=proto.text.toString().trim()
+        val cn=cloud.selectedItem.toString()
+        val user=account.text.toString().trim()
+        val pass=password.text.toString()
+        if(h.isBlank()||devId.isBlank()||m.length<6){
+            state.text="Wykryj pompę lub podaj IP, Device ID i model"
+            return
+        }
+        if(pr=="3" && (user.isBlank()||pass.isBlank())){
+            state.text="Podaj login i hasło SmartHome dla bezpiecznego połączenia V3"
+            return
+        }
+        try{
+            SecurePumpSettings.save(this,PumpSettings(h,p,devId,m,pr,cn,user,pass))
+            SecurePumpSettings.setEnabled(this,true)
+            if(Build.VERSION.SDK_INT>=33 &&
+               checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED){
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),241)
+            }
+            MonitorService.start(this)
+            state.text="Uruchomiono usługę monitoringu w tle • obserwuj powiadomienie Androida"
+        }catch(ex:Exception){
+            SecurePumpSettings.setEnabled(this,false)
+            state.text="Nie udało się uruchomić usługi ("+ex.javaClass.simpleName+")"
+        }
+    }
+
+    private fun stopMonitor(){
+        SecurePumpSettings.setEnabled(this,false)
+        MonitorService.stop(this)
+        state.text="Zlecono zatrzymanie monitoringu (historia na telefonie pozostaje)"
+    }
+    private fun cloudProfile(){
+        val cn=cloud.selectedItem.toString()
+        val un=account.text.toString().trim()
+        val pw=password.text.toString()
+        val devId=id.text.toString().trim()
+        job("Sprawdzanie profilu Lua w chmurze"){
+            val result=getPython().getModule("midea_bridge").callAttr(
+                "cloud_profile",cn,un,pw,devId).toString()
+            onUI{state.text="Cloud Lua: $result"}
+        }
+    }
+    private fun downloadLuaAndSave(){
+        if(luaDownloadInProgress){
+            state.text="Pobieranie lub zapis Lua już trwa"
+            return
+        }
+        val cn=cloud.selectedItem.toString()
+        val un=account.text.toString().trim()
+        val pw=password.text.toString()
+        val devId=id.text.toString().trim()
+        if(un.isBlank()||pw.isBlank()||devId.isBlank()){
+            state.text="Podaj login chmury, hasło i Device ID"
+            return
+        }
+        luaDownloadInProgress=true
+        job("Pobieram oryginalny Lua z chmury Midea"){
+            try{
+                val response=JSONObject(getPython().getModule("midea_bridge").callAttr(
+                    "download_lua_file",cn,un,pw,devId,cacheDir.absolutePath
+                ).toString())
+                val path=response.getString("path")
+                val meta=response.getJSONObject("metadata")
+                val hash=meta.getString("luaSha256")
+                onUI {
+                    pendingLuaPath=path
+                    pendingLuaHash=hash
+                    try {
+                        val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type="text/plain"
+                            putExtra(Intent.EXTRA_TITLE,"Midea_171H120F_cloud_protocol.lua")
+                        }
+                        startActivityForResult(intent,requestSaveLua)
+                        state.text="Wybierz folder i zatwierdź zapis pliku .lua"
+                    } catch(ex:Exception) {
+                        File(path).delete()
+                        pendingLuaPath=null
+                        pendingLuaHash=null
+                        luaDownloadInProgress=false
+                        state.text="Nie można otworzyć okna zapisu: "+ex.javaClass.simpleName
+                    }
+                }
+            }catch(ex:Exception){
+                luaDownloadInProgress=false
+                // Do not show raw cloud errors: they can contain identifiers.
+                onUI { state.text="Pobranie Lua nieudane ("+ex.javaClass.simpleName+")" }
+            }
+        }
+    }
+
+    @Deprecated("Android document picker result")
+    override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
+        super.onActivityResult(requestCode,resultCode,data)
+        if(requestCode==requestSaveDiagnostics){
+            val payload=pendingDiagnosticsJson
+            pendingDiagnosticsJson=null
+            val uri=data?.data
+            if(resultCode!=RESULT_OK || uri==null || payload==null){
+                state.text="Zapis raportu anulowany"
+                return
+            }
+            work.execute{
+                try {
+                    val stream=contentResolver.openOutputStream(uri,"w")
+                        ?:throw IllegalStateException("Nie można otworzyć pliku")
+                    stream.use{it.write(payload.toByteArray(Charsets.UTF_8)); it.flush()}
+                    onUI {
+                        state.text="Raport Lua / surowe ramki zapisany ("+payload.length+" znaków)"
+                        Toast.makeText(this,"Dołącz zapisany plik JSON do rozmowy.",Toast.LENGTH_LONG).show()
+                    }
+                }catch(ex:Exception){
+                    onUI{state.text="Błąd zapisu diagnostyki: "+ex.javaClass.simpleName}
+                }
             }
             return
         }
-        if (luaSnapshot.fields.isNotEmpty()) {
-            section("Aktualna praca urządzenia", "Odczyt diagnostyczny Lua 0x10 — wartości surowe")
-            metricPair("Sprężarka · Hz (surowe)", diagValue("compRunFreq", "comp_run_freq"), "Tylko gdy chmura odda parametr",
-                "Zasilanie Tw_out", diagValue("tempTwout", "temp_tw_out"), "Surowa temperatura")
-            metricPair("Powrót Tw_in", diagValue("tempTwin", "temp_tw_in"), "Surowa temperatura",
-                "Wymiennik T3", diagValue("tempT3", "temp_t3"), "Surowa temperatura")
+        if(requestCode!=requestSaveLua)return
+        val path=pendingLuaPath
+        val expected=pendingLuaHash
+        pendingLuaPath=null
+        pendingLuaHash=null
+        val uri=data?.data
+        if(resultCode!=RESULT_OK || uri==null || path==null || expected==null){
+            if(path!=null)File(path).delete()
+            luaDownloadInProgress=false
+            state.text="Zapis pliku Lua anulowany"
+            return
         }
-        if (lanSnapshot.values.has("comp_run_freq")) {
-            val lan=lanSnapshot.values
-            fun valOrDash(key:String) = if(lan.has(key)) lan.optString(key) else "—"
-            section("Rzeczywista praca pompy", "Odczyt z fabrycznego Wi-Fi • X10 / powiadomienie X05")
-            metricPair("Sprężarka",valOrDash("comp_run_freq")+" Hz",
-                if(lan.optInt("comp_run_freq")>0)"Pracuje" else "Nie pracuje",
-                "Wentylator",valOrDash("fan_speed")+" obr./min","Pomiar z protokołu",
-                blue,Color.rgb(29,128,106))
-            metricPair("Zasilanie wody",valOrDash("temp_tw_out")+" °C","Tw_out",
-                "Powrót wody",valOrDash("temp_tw_in")+" °C","Tw_in")
-            metricPair("Wymiennik T2",valOrDash("temp_t2")+" °C","Pomiar",
-                "Wymiennik T3",valOrDash("temp_t3")+" °C","Pomiar")
-            card(root) { c ->
-                fieldRow(c,"Częstotliwość zadana",valOrDash("odu_target_fre")+" Hz")
-                fieldRow(c,"Ciśnienie wysokie (surowe)",valOrDash("pressure_high"))
-                fieldRow(c,"Ciśnienie niskie (surowe)",valOrDash("pressure_low"))
-                fieldRow(c,"Przepływ wody (surowe)",valOrDash("water_flow_raw"))
-                caption(c,"Zera to pomiary tylko przy odebranym X10/X05; brak pomiaru oznaczamy —. Ciśnienia wymagają potwierdzenia skali.")
-            }
-        }
-        section("Ciepła woda użytkowa", "Temperatura zasobnika a nastawa")
-        metricPair("Woda w zasobniku", temp("tank_actual_temp"), "Odczyt SmartHome",
-            "Temperatura zadana", temp("dhw_temp_set"), "Nastawa CWU")
-        card(root, bluePale) { c ->
-            fieldRow(c, "CWU — włączona", state("dhw_power_state"))
-            fieldRow(c, "Funkcja CWU dopuszczona", state("dhw_enable"))
-            caption(c, "Stan funkcji i aktualne grzanie wody to dwie różne informacje. Nie mamy sygnału faktycznej pracy sprężarki.")
-        }
-        section("Obiegi grzewcze", "Nastawy i konfiguracja, nie temperatura zasilania")
-        metricPair("Obieg 1 · grzejniki", temp("zone1_temp_set"), state("zone1_power_state") + " · zadana",
-            "Obieg 2 · podłogówka", temp("zone2_temp_set"), state("zone2_power_state") + " · zadana",
-            blue, Color.rgb(121, 137, 156))
-        card(root) { c ->
-            fieldRow(c, "Dwa obiegi w konfiguracji", state("double_zone_enable"))
-            fieldRow(c, "Krzywa pogodowa obieg 1", state("zone1_curve_state"))
-            fieldRow(c, "Krzywa pogodowa obieg 2", state("zone2_curve_state"))
-            caption(c, "Odczyt 46 °C w obiegu 2 jest zapamiętaną nastawą. Obieg 2 jest wyłączony, a funkcja dwóch obiegów nieaktywna.")
-        }
-        section("Komfort i ustawienia")
-        metricPair("Temperatura pokojowa", temp("room_temp_set"), "Zadana · nie pomiar",
-            "Kod błędu pompy", cloudValue("error_code") ?: "—", "Wartość sterownika",
-            blue, if (cloudValue("error_code") == "0") Color.rgb(26, 145, 103) else warning)
-        card(root) { c ->
-            fieldRow(c, "ECO", state("eco_on_state"))
-            fieldRow(c, "Tryb cichy", state("silence_on_state"))
-            fieldRow(c, "Tryb urlopowy", state("holiday_on_state"))
-            fieldRow(c, "Szybkie CWU", state("fastdhw_state"))
-        }
-        section("Odczyt i połączenie")
-        card(root) { c ->
-            label(c, "${snapshot.fields.size} pól odebranych  •  ${snapshot.recognized} opisanych", 15, ink, true, 6)
-            caption(c, "Dane ze status/lua/get. Czas pomiaru w urządzeniu jest nieznany.")
-            caption(c, "Jednostki °C są interpretacją nazw pól i wymagają porównania ze sterownikiem.")
-            spacing(c, 13)
-            action(c, "↻  Odśwież odczyt", primary = true) { fetchStatus() }
-            spacing(c, 8)
-            action(c, "Pełna diagnostyka i pola surowe") { tab = 1; dashboard() }
-        }
-    }
-
-    private fun showTiles(header: String, fields: List<TelemetryField>) {
-        title(root, header)
-        fields.chunked(2).forEach { pair ->
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            root.addView(row)
-            pair.forEach { field ->
-                val tile = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(12), dp(14), dp(10), dp(14))
-                    background = shape(white, 14)
-                    minimumHeight = dp(118)
+        state.text="Zapisuję pobrany plik Lua…"
+        work.execute {
+            val file=File(path)
+            try {
+                require(file.canonicalFile.parentFile==cacheDir.canonicalFile){
+                    "Nieprawidłowy katalog pliku"
                 }
-                val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    bottomMargin = dp(10); rightMargin = dp(5)
-                }
-                row.addView(tile, params)
-                label(tile, field.recognizedLabel ?: field.key, 12, muted, false, 5)
-                label(tile, field.shownValue.take(28), 25, blue, true, 4)
-                caption(tile, "Surowe • ${field.key}")
-            }
-            if (pair.size == 1) row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        }
-        spacing(root, 6)
-    }
-
-    private fun rawData(pump: Pump) {
-        card(root, bluePale) { c ->
-            title(c, "Diagnostyka układu chłodniczego")
-            label(c, "Sprężarka · wymienniki · ciśnienia", 14, ink, true, 7)
-            caption(c, "W obecnym status/lua/get nie ma częstotliwości sprężarki, temperatur T2/T2B/T3/TP/TH ani ciśnień. Nie podstawiamy w ich miejsce nastaw.")
-            spacing(c, 10)
-            action(c, "Odczytaj parametry serwisowe — Lua 0x10", primary = true) { fetchLuaDiagnostic() }
-            caption(c, "Eksperymentalne zapytanie odczytowe query_type=16 przez działające API status/lua/get. Nie zmienia nastaw.")
-            spacing(c, 9)
-            action(c, "X10  •  Stary test transparent/send") { fetchDiagnostic() }
-            caption(c, "Zapytanie X10 może zwrócić błąd API 9999. Nie oznacza to alarmu pompy.")
-        }
-        if (luaSnapshot.fields.isNotEmpty()) {
-            card(root) { c ->
-                title(c, "Odczyt serwisowy Lua 0x10")
-                caption(c, "Odebrano ${luaSnapshot.fields.size} pól • ${luaFetchedAt.take(19)} UTC. Poniżej bez domyślania jednostek.")
-                val technical = listOf(
-                    "Sprężarka — częstotliwość" to diagValue("compRunFreq", "comp_run_freq"),
-                    "Sprężarka — prąd" to diagValue("oduCompCurrent", "odu_comp_current"),
-                    "Woda — wejście Tw_in" to diagValue("tempTwin", "temp_tw_in"),
-                    "Woda — wyjście Tw_out" to diagValue("tempTwout", "temp_tw_out"),
-                    "Wymiennik T2" to diagValue("tempT2", "temp_t2"),
-                    "Wymiennik T2B" to diagValue("tempT2b", "temp_t2b"),
-                    "Wymiennik zewnętrzny T3" to diagValue("tempT3", "temp_t3"),
-                    "Temperatura tłoczenia TP" to diagValue("tempTp", "temp_tp"),
-                    "Zewnętrzna T4" to diagValue("tempT4", "temp_t4", "t4"),
-                    "Wysokie ciśnienie" to diagValue("pressureHigh", "pressure_high"),
-                    "Niskie ciśnienie" to diagValue("pressureLow", "pressure_low"),
-                    "Prędkość wentylatora" to diagValue("fanSpeed", "fan_speed"),
-                    "Zawór EXV" to diagValue("exvCurrent", "exv_current")
-                )
-                technical.forEach { (name, value) -> fieldRow(c, name, value, value == "—") }
-                caption(c, "— oznacza brak parametru, nie wartość zero. Ciśnienia i częstotliwości nie są zgadywane.")
-                spacing(c, 9)
-                action(c, "Eksportuj raport (z Lua 0x10)") { export(pump) }
-            }
-        }
-        card(root) { c ->
-            label(c, "Wszystkie odebrane pola: ${snapshot.fields.size}", 16, ink, true, 6)
-            caption(c, "Widok techniczny z mapowaniem pól do nazw. Zachowuje wartości surowe i klucze z chmury.")
-            spacing(c, 10)
-            action(c, "Eksportuj pełny JSON") { export(pump) }
-        }
-        card(root) { c ->
-            title(c, "Lista pól (${snapshot.fields.size})")
-            caption(c, "Widoczne są również pola bez opisów i wartości zero. Dane prywatne zostały ukryte.")
-            spacing(c, 11)
-            val query = EditText(this).apply {
-                hint = "Szukaj nazwy lub wartości…"
-                setSingleLine(true)
-                textSize = 15f
-                inputType = InputType.TYPE_CLASS_TEXT
-                setText(searchQuery)
-            }
-            c.addView(query)
-            spacing(c, 9)
-            action(c, if (onlyUnknown) "Filtr: nierozpoznane  •  pokaż wszystko" else "Filtr: wszystkie  •  tylko nierozpoznane") {
-                onlyUnknown = !onlyUnknown
-                dashboard()
-            }
-            spacing(c, 9)
-            action(c, "Zapisz raport JSON") { export(pump) }
-            val count = label(c, "", 13, muted)
-            val data = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            c.addView(data)
-            fun update() {
-                data.removeAllViews()
-                val selectedFields = snapshot.fields.filter { f ->
-                    (!onlyUnknown || (!f.recognized && !f.redacted)) &&
-                        (searchQuery.isBlank() || f.path.contains(searchQuery, true) ||
-                            f.shownValue.contains(searchQuery, true) ||
-                            (f.recognizedLabel?.contains(searchQuery, true) ?: false))
-                }
-                count.text = "Widoczne: ${selectedFields.size} / ${snapshot.fields.size}"
-                if (selectedFields.isEmpty()) caption(data, "Brak pól pasujących do filtra.")
-                selectedFields.forEach { f ->
-                    spacing(data, 9)
-                    label(data, f.path, 14, ink, true, 4)
-                    label(data, f.shownValue.take(1000), 16, if (f.recognized) blue else ink)
-                    caption(data, when {
-                        f.redacted -> "UKRYTE • dane prywatne"
-                        f.recognized -> "OPISANE • ${f.recognizedLabel}"
-                        else -> "NIEROZPOZNANE • bez przypisanej jednostki"
-                    })
-                    val divider = View(this).apply { setBackgroundColor(this@MainActivity.background) }
-                    data.addView(divider, LinearLayout.LayoutParams(-1, dp(1)))
-                }
-            }
-            query.addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                    searchQuery = s?.toString().orEmpty()
-                    update()
-                }
-                override fun afterTextChanged(s: Editable?) {}
-            })
-            update()
-        }
-        if (rawX10.isNotBlank()) card(root) { c ->
-            title(c, "Odpowiedź X10 — HEX")
-            label(c, rawX10, 12)
-        }
-    }
-
-    private fun wifiTab(pump: Pump) {
-        card(root, bluePale) { c ->
-            title(c,"Wi-Fi lokalne · Midea C3")
-            caption(c,"Telefon musi być połączony z tą samą siecią Wi-Fi co fabryczny moduł pompy. Brak Home Assistant, Modbus i dodatkowych urządzeń.")
-            spacing(c,9)
-            label(c,"Połączenie: $lanStatus",14,ink,true)
-            if(lanFetchedAt.isNotBlank())caption(c,"Odczyt: ${lanFetchedAt.take(19)} UTC • ${lanSnapshot.fields.size} pól")
-            spacing(c,10)
-            action(c,"Wyszukaj pompę w sieci Wi-Fi", primary=true){ findLan() }
-        }
-        if(lanDiscoveries.isNotEmpty()) {
-            card(root){ c ->
-                title(c,"Znalezione urządzenia C3")
-                lanDiscoveries.forEach { d ->
-                    fieldRow(c,d.display,if(d.id==pump.id)"TA SAMA POMPA" else "Inny identyfikator")
-                    spacing(c,6)
-                    action(c, "Użyj ${d.host} (${if(d.protocol==3)"V3" else "V2"})"){
-                        if(d.id != pump.id) { statusText.text="To inne urządzenie. Można odczytać tylko wybraną pompę." }
-                        else { localPump=d;localProtocol=d.protocol;lanStatus="Wybrano ${d.display}";dashboard() }
-                    }
-                    spacing(c,10)
-                }
-            }
-        }
-        card(root) { c ->
-            title(c,"Połączenie po adresie IP")
-            caption(c,"Gdy router blokuje broadcast, wpisz lokalny IP fabrycznego modułu. Port z wykrywania jest preferowany; dla ręcznego IP: 6444.")
-            val ip=EditText(this).apply {
-                hint="192.168.1.50";setText(lastWifiIp.ifBlank{localPump?.host.orEmpty()});textSize=16f;setSingleLine(true)
-                inputType=InputType.TYPE_CLASS_TEXT
-            }
-            c.addView(ip)
-            spacing(c,7)
-            action(c,"Użyj tego adresu i wybranego protokołu"){
-                val value=ip.text.toString().trim()
-                try { WifiC3.checkedIp(value)
-                    lastWifiIp=value
-                    localPump=LanPump(value,6444,pump.id,0xc3,localProtocol,pump.sn8)
-                    lanStatus="Adres ręczny: $value · V$localProtocol";dashboard()
-                } catch(e:Exception) { statusText.text=e.message.orEmpty() }
-            }
-            spacing(c,8)
-            action(c,"Protokół: V${localProtocol} — zmień V2/V3"){
-                localProtocol=if(localProtocol==3)2 else 3
-                localPump=localPump?.copy(protocol=localProtocol)
-                dashboard()
-            }
-            caption(c,"V3 wymaga kluczy urządzenia z konta SmartHome. V2 korzysta z historycznego protokołu Midea; wiele nowych modułów odrzuca V2.")
-        }
-        card(root){ c ->
-            title(c,"Diagnostyka lokalna")
-            caption(c,"Wersja 0.7.1: dokładny format heartbeat midea-lan; X10 najpierw po A0/X01, ponownie po inicjalizacji. Odczyty wyłącznie z rzeczywistych ramek X10/X05.")
-            spacing(c,9)
-            action(c,"Odczyt Wi-Fi · 30 sekund",primary=true){ readLan(30) }
-            action(c,"Odczyt serwisowy • 3 minuty (zalecane)",primary=true){ readLan(180) }
-            lanStopButton = android.widget.Button(this).apply {
-                text="Zatrzymaj nasłuch i zachowaj dane"
-                isEnabled=false
-                setOnClickListener { lanCancelled.set(true);isEnabled=false }
-                c.addView(this)
-            }
-            if(lanSnapshot.fields.isNotEmpty()){
-                spacing(c,11)
-                label(c, "Źródło danych: $lanResultType · ${lanSnapshot.fields.size} pól", 13, ink, true)
-                if(!lanSnapshot.values.has("comp_run_freq")) caption(c,"Brak potwierdzonych danych sprężarki w tej sesji.")
-                lanSnapshot.fields.forEach{ f->
-                    fieldRow(c,f.recognizedLabel?:f.key,f.shownValue)
-                    caption(c,"${lanSources[f.key].orEmpty()} · ${lanTimes[f.key].orEmpty().take(19)} UTC")
-                }
-            }
-        }
-        if(lanFrames.isNotEmpty())card(root){ c ->
-            title(c,"Wysłane i odebrane ramki C3")
-            caption(c,"Zapisujemy maksymalnie 88 pierwszych bajtów każdej ramki. Usuwamy dalszą część, która może zawierać numer seryjny pompy.")
-            lanFrames.forEach { f ->
-                label(c,"${f.direction} ${f.receivedAt.takeLast(13)} ${f.request} → 0x${f.messageType.toString(16)}/0x${f.subtype.toString(16)} · ${f.size} B · suma ${if(f.checksumOk) "OK" else "NOK"}",12,ink,true,5)
-                label(c,f.rawPrefixHex+(if(f.truncated)" [obcięto]" else ""),11,muted)
-                spacing(c,9)
-            }
-        }
-        if(lanSteps.isNotEmpty())card(root){ c ->
-            title(c,"Dziennik połączenia Wi-Fi")
-            lanSteps.forEach{caption(c,"• $it")}
-            spacing(c,10)
-            action(c,"Eksportuj wyniki testu") { export(pump) }
-        }
-    }
-
-    private fun readLan(durationSeconds: Int = 30){
-        if(busy)return
-        val p=selected ?:return
-        val l=localPump ?: run{statusText.text="Najpierw wyszukaj moduł lub podaj jego IP";return}
-        if(l.id!=p.id){statusText.text="Identyfikator urządzenia różni się od wybranej pompy";return}
-        val now=SystemClock.elapsedRealtime()
-        if(now-lastWifiRead in 0..29_999L){statusText.text="Ponów odczyt Wi-Fi po 30 sekundach.";return}
-        lastWifiRead=now
-        lanCancelled.set(false)
-        lanStopButton?.isEnabled=true
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        runTask("Łączenie Wi-Fi z ${l.host}…",{
-            // Never store or print LAN token/key. Obtained using currently authenticated cloud session.
-            val keys= if(l.protocol==3) cloud.lanKeys(p.id) else null
-            WifiC3.poll(this,l,p.sn8,keys,durationSeconds,{lanCancelled.get()}) { result,remaining ->
-                runOnUiThread {
-                    if(!isFinishing && !isDestroyed) {
-                        acceptLan(result)
-                        statusText.text="Nasłuch: pozostało ${remaining}s · ${result.readings.size} pól · ${result.frames.count{it.direction=="RX"}} ramek RX"
+                val sha=MessageDigest.getInstance("SHA-256")
+                val output=contentResolver.openOutputStream(uri,"w")
+                    ?:throw IllegalStateException("Brak dostępu do zapisu pliku")
+                var length=0L
+                file.inputStream().use { input ->
+                    output.use { target ->
+                        val buffer=ByteArray(32768)
+                        while(true){
+                            val n=input.read(buffer)
+                            if(n<0)break
+                            target.write(buffer,0,n)
+                            sha.update(buffer,0,n)
+                            length+=n
+                        }
+                        target.flush()
                     }
                 }
+                val actual=sha.digest().joinToString(""){"%02x".format(it.toInt() and 255)}
+                check(actual.equals(expected,ignoreCase=true)){"Niezgodny SHA-256 pliku Lua"}
+                onUI {
+                    luaSavedName="Midea_171H120F_cloud_protocol.lua"
+                    state.text="Lua zapisany: $length bajtów • SHA-256 zgodny"
+                    Toast.makeText(this,"Plik Lua zapisany. Dołącz go tutaj w ChatGPT.",Toast.LENGTH_LONG).show()
+                }
+            }catch(ex:Exception){
+                onUI {
+                    state.text="Błąd zapisu Lua: "+ex.javaClass.simpleName
+                    Toast.makeText(this,"Nie udało się zapisać pliku Lua",Toast.LENGTH_LONG).show()
+                }
+            }finally {
+                file.delete()
+                luaDownloadInProgress=false
             }
-        },{result->
-            acceptLan(result)
-            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            lanStopButton?.isEnabled=false
-            lanStatus=if(result.readings.isEmpty()) "Sesja zakończona bez rozpoznanych danych — sprawdź dziennik"
-                else "Odebrano ${result.readings.size} pól · $lanResultType"
-            feedback=lanStatus;dashboard()
-        },{e ->
-            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            lanStopButton?.isEnabled=false
-            lanStatus="Błąd Wi-Fi: ${e.message?.take(150)?:e.javaClass.simpleName}"
-            lanSteps=lanSteps+listOf(lanStatus)
-            feedback=lanStatus;dashboard()
-        })
-    }
-    private fun acceptLan(result:LanResult) {
-        lanSnapshot=Telemetry.capture(JSONObject(result.readings));lanRawX10=result.rawX10
-        lanFrames=result.frames;lanResultType=result.responseType
-        lanSources=result.fieldSources;lanTimes=result.fieldTimes
-        lanFetchedAt=Instant.now().toString();lanSteps=result.steps
-    }
-    private fun findLan(){
-        runTask("Wyszukiwanie fabrycznego Wi-Fi C3…",{WifiC3.discover(this)},{found ->
-            lanDiscoveries=found
-            val p=selected
-            localPump=found.firstOrNull{it.id==p?.id}
-            if(localPump!=null) localProtocol=localPump!!.protocol
-            lanStatus=if(found.isEmpty())"Nie wykryto modułu — spróbuj podać IP" else "Wykryto ${found.size} urządzeń C3"
-            feedback=lanStatus;dashboard()
-        },{e ->lanStatus="Błąd wykrywania: ${e.message?.take(130)}";feedback=lanStatus;dashboard()})
-    }
-    private fun comparisonTab(pump:Pump){
-        card(root,bluePale){ c->
-            title(c,"Chmura kontra Wi-Fi")
-            caption(c,"Porównanie tylko rzeczywiście odebranych wartości. Znak — oznacza brak parametru, nie wartość 0.")
-            fieldRow(c,"Chmura SmartHome", "${snapshot.fields.size} pól")
-            fieldRow(c,"Chmura Lua serwisowa", "${luaSnapshot.fields.size} pól")
-            fieldRow(c,"Wi-Fi ($lanResultType)", "${lanSnapshot.fields.size} pól")
-        }
-        val mapped=listOf(
-            Triple("Sprężarka – częstotliwość","comp_run_freq","compRunFreq"),
-            Triple("Sprężarka – prąd","odu_comp_current","oduCompCurrent"),
-            Triple("Woda – wejście Tw_in","temp_tw_in","tempTwin"),
-            Triple("Woda – wyjście Tw_out","temp_tw_out","tempTwout"),
-            Triple("Wymiennik T2","temp_t2","tempT2"),
-            Triple("Wymiennik T2B","temp_t2b","tempT2b"),
-            Triple("Wymiennik T3","temp_t3","tempT3"),
-            Triple("Temperatura tłoczenia TP","temp_tp","tempTp"),
-            Triple("Zewnętrzna T4","temp_t4","tempT4"),
-            Triple("Ciśnienie wysokie","pressure_high","pressureHigh"),
-            Triple("Ciśnienie niskie","pressure_low","pressureLow"),
-            Triple("Wentylator","fan_speed","fanSpeed")
-        )
-        card(root){c->
-            title(c,"Diagnostyka pracy pompy")
-            caption(c,"Format: Wi-Fi / Chmura serwisowa. Surowe wartości nie są utożsamiane z temperaturami zadanymi.")
-            mapped.forEach{(name,local,remote)->
-                val l=lanSnapshot.values.optString(local,"").ifBlank{"—"}
-                val cr=luaSnapshot.values.optString(remote,"").ifBlank{luaSnapshot.values.optString(local,"").ifBlank{"—"}}
-                fieldRow(c,name,"$l / $cr",l=="—"&&cr=="—")
-            }
-        }
-        card(root){ c ->
-            title(c,"Stan konfiguracji z chmury")
-            fieldRow(c,"Tryb ustawiony",cloudValue("run_mode_set")?:"—")
-            fieldRow(c,"Obieg 1 (nastawa)",cloudValue("zone1_temp_set")?:"—")
-            fieldRow(c,"CWU (odczyt)",cloudValue("tank_actual_temp")?:"—")
-            fieldRow(c,"Kod błędu",cloudValue("error_code")?:"—")
-            caption(c,"Te pola nie są równoważne diagnostyce sprężarki. Odczyty z LAN i chmury mogą mieć różne czasy i skale.")
-            spacing(c,10)
-            action(c,"Eksportuj porównanie JSON",primary=true){export(pump)}
         }
     }
 
-    private fun settings(pump: Pump) {
-        card(root) { c ->
-            title(c, "Połączona pompa")
-            label(c, pump.name, 18, ink, true, 6)
-            caption(c, "Profil ${pump.sn8} • podtyp ${pump.subtype}")
-            spacing(c, 12)
-            action(c, "Wybierz inną pompę") { chooseScreen() }
-        }
-        card(root) { c ->
-            title(c, "Konto SmartHome")
-            caption(c, currentAccount)
-            spacing(c, 6)
-            label(c, if (rememberLogin) "Zapamiętywanie: włączone" else "Zapamiętywanie: wyłączone", 14, ink)
-            caption(c, "Hasło przechowywane lokalnie jako zaszyfrowany zapis Android Keystore; token sesji tylko w pamięci.")
-            spacing(c, 10)
-            action(c, "Wyloguj i usuń zapisane dane", destructive = true) { logout() }
-        }
-        card(root) { c ->
-            title(c, "Prywatność i odczyt")
-            caption(c, "Zrzuty ekranu są dozwolone. Raport JSON nie zawiera danych logowania ani tokenów.")
-            spacing(c, 6)
-            caption(c, "Nie uruchamiamy Home Assistant ani Modbus. Lokalny odczyt korzysta wyłącznie z fabrycznego Wi-Fi. Bez zmiany nastaw pompy.")
-            spacing(c, 9)
-            caption(c, "Wersja 0.7.1 • X10: poprawna ramka heartbeat i dwie próby diagnostyki")
+    private val tick=object:Runnable{
+        override fun run(){
+            if(!active)return
+            if(!refreshing){
+                refreshing=true
+                statusWork.execute{
+                    try{
+                        if(!Python.isStarted())return@execute
+                        val bridge=getPython().getModule("midea_bridge")
+                        val snap=JSONObject(bridge.callAttr("snapshot").toString())
+                        val diagnostics=JSONObject(bridge.callAttr("diagnostic_snapshot").toString())
+                        onUI{render(snap,diagnostics)}
+                    }catch(_:Exception){}finally{refreshing=false}
+                }
+            }
+            handler.postDelayed(this,3000)
         }
     }
+    private fun age(timestamp:String):String{
+        if(timestamp.isBlank())return "Brak aktualizacji"
+        return try{
+            val minutes=Duration.between(OffsetDateTime.parse(timestamp).toInstant(),
+                java.time.Instant.now()).toMinutes().coerceAtLeast(0)
+            when{
+                minutes<1 -> "teraz"
+                minutes<60 -> "$minutes min temu"
+                else -> "${minutes/60} h ${minutes%60} min temu"
+            }
+        }catch(_:Exception){"Odczyt: "+timestamp.take(19).replace("T"," ")}
+    }
+    private fun format(value:Any?):String = when(value){
+        null,JSONObject.NULL -> "—"
+        is Boolean -> if(value)"TAK" else "NIE"
+        else -> value.toString()
+    }
+    private fun setTile(key:String,display:String,source:String,updatedAt:String) {
+        tiles[key]?.let{
+            it.first.text=display
+            it.second.text=if(updatedAt.isNotEmpty()) "$source • "+age(updatedAt)
+                 else "$source • brak raportu"
+        }
+    }
+    private fun render(snap:JSONObject,diag:JSONObject){
+        val data=snap.optJSONObject("values")?:JSONObject()
+        val times=snap.optJSONObject("updatesAt")?:JSONObject()
+        val x01=times.optString("zone1_power","")
+        val x04=times.optString("outdoor_temperature","")
+        val x05=times.optString("silent_level","")
+        val x07=times.optString("eco_function_state","")
+        val zone=data.optJSONArray("zone_target_temp")
+        val target=if(zone!=null && zone.length()>0)format(zone.opt(0))+"°C" else "—"
+        val mode=when(data.optInt("mode",-1)){
+            3->"Ogrzewanie"
+            2->"Chłodzenie"
+            else->format(data.opt("mode"))
+        }
+        val heat=if(data.has("status_heating"))
+            if(data.optBoolean("status_heating")) "AKTYWNE" else "NIEAKTYWNE"
+            else "—"
+        setTile("status_heating",heat,"Raport 04-04",x04)
+        val outdoor=if(data.has("outdoor_temperature"))
+            format(data.opt("outdoor_temperature"))+"°C" else "—"
+        setTile("outdoor_temperature",outdoor,"Raport 04-04",x04)
+        setTile("zone1_target",target,"X01",x01)
+        setTile("mode",mode,"X01",x01)
+        setTile("zone1_power",format(data.opt("zone1_power")),"X01",x01)
+        setTile("silent_level",format(data.opt("silent_level")),"X05",x05)
+        setTile("eco_function_state",format(data.opt("eco_function_state")),"X07",x07)
+        setTile("error_code",format(data.opt("error_code")),"X01",x01)
+        setTile("total_energy_consumption",format(data.opt("total_energy_consumption")),"Raport 04-04 • surowe",x04)
+        setTile("total_produced_energy",format(data.opt("total_produced_energy")),"Raport 04-04 • surowe",x04)
 
-    private fun fetchStatus() {
-        val p = selected ?: return
-        if (!cooldown(false)) return
-        runTask("Pobieram status SmartHome…", { cloud.status(p) }, { result ->
-            snapshot = Telemetry.capture(result)
-            source = "status/lua/get"
-            fetchedAt = Instant.now().toString()
-            rawX10 = ""; clearError()
-            feedback = ""
-            dashboard()
-        }, { error -> failedRead(error) })
-    }
-    private fun fetchLuaDiagnostic() {
-        val p = selected ?: return
-        if (!cooldown(true)) return
-        runTask("Pobieram parametry pracy Lua 0x10…", { cloud.unitDiagnosticsLua(p) }, { result ->
-            luaSnapshot = Telemetry.capture(result)
-            luaFetchedAt = Instant.now().toString()
-            clearError()
-            feedback = "Lua 0x10: odebrano ${luaSnapshot.fields.size} pól. Jeśli brakuje sprężarki, chmura nie przekazała diagnostyki."
-            cloudChecks.add("Lua 0x10: ${luaSnapshot.fields.size} pól — ${Instant.now()}")
-            tab = 1
-            dashboard()
-        }, { error ->
-            cloudChecks.add("Lua 0x10: ${error.message?.take(100) ?: error.javaClass.simpleName}")
-            failedRead(error)
-        })
-    }
-    private fun fetchDiagnostic() {
-        val p = selected ?: return
-        if (!cooldown(true)) return
-        runTask("Jednorazowa diagnostyka X10…", { cloud.diagnostic(p) }, { result ->
-            snapshot = Telemetry.capture(JSONObject(result.readings))
-            rawX10 = result.rawFrameHex
-            source = "transparent/send • X10"
-            fetchedAt = Instant.now().toString()
-            clearError()
-            feedback = if (result.profileDecoded) "X10: wartości surowe. Zweryfikuj skale na sterowniku."
-                else "Otrzymano X10; profil nie ma pewnego dekodera. Surowy HEX w zakładce Dane."
-            dashboard()
-        }, { error -> failedRead(error) })
-    }
-    private fun failedRead(error: Throwable) {
-        val e = error as? CloudException
-        lastCode = e?.code
-        errorEndpoint = e?.endpoint
-        errorAt = Instant.now().toString()
-        feedback = errorMessage(error)
-        dashboard()
-    }
-    private fun errorMessage(t: Throwable): String = when ((t as? CloudException)?.code) {
-        9999 -> "SmartHome zwrócił 9999 — błąd odpowiedzi API, a nie kod alarmu pompy."
-        3176, 1306 -> "Chmura nie udostępniła odpowiedzi diagnostycznej (${(t as CloudException).code})."
-        1014 -> "Chmura nie odczytała statusu Lua (1014)."
-        3105, 3106, 3301, 3001, 7400, 40002 -> "Sesja została odrzucona. Wróć do logowania."
-        null -> if (t is java.io.IOException) "Problem z połączeniem z Midea: ${t.message.orEmpty().take(80)}"
-            else "Nie udało się odczytać danych (${t.javaClass.simpleName})."
-        else -> "SmartHome odrzucił zapytanie: ${(t as CloudException).code}."
-    }
-    private fun clearError() { lastCode = null; errorEndpoint = null; errorAt = "" }
-    private fun cooldown(diagnostic: Boolean): Boolean {
-        val now = SystemClock.elapsedRealtime()
-        val previous = if (diagnostic) lastDiagnostic else lastStatus
-        val duration = 60_000L
-        if (now - previous in 0 until duration) {
-            statusText.text = "Ponowny odczyt dostępny za ${((duration - (now - previous)) / 1000) + 1} s."
-            return false
+        val keys=data.keys().asSequence().toList().sorted()
+        values.text=keys.joinToString("\n"){k->k+" = "+format(data.opt(k))}
+            .ifEmpty{"Oczekiwanie na potwierdzone wartości…"}
+        counters.text="Pola odebrane: ${snap.optInt("presentCount")} / ${snap.optInt("allCount")}"+
+            " • Historia: ${snap.optInt("observationsCount")} próbek"
+        val stats=diag.optJSONObject("frameStats")?:JSONObject()
+        frames.text=listOf("03-01","03-05","03-07","04-03","04-04","04-05","03-10").joinToString("\n"){key->
+            val row=stats.optJSONObject(key)
+            "$key: ${row?.optInt("count")?:0} pakietów"+
+                (row?.optInt("lastBytes",0)?.takeIf{it>0}?.let{" • $it B"}?:"")+
+                (row?.optString("lastSeen")?.let{" • "+age(it)}?:"")
+        }+"\nPełne ramki do eksportu: "+diag.optInt("rawFramesStored",0)+" (tylko 04-04/04-05)"
+        val lua=diag.optJSONObject("luaDecoded")?:JSONObject()
+        val luaData=lua.optJSONObject("values")?:JSONObject()
+        val luaTimes=lua.optJSONObject("updatesAt")?:JSONObject()
+        val luaSources=lua.optJSONObject("sources")?:JSONObject()
+        val luaKeys=luaData.keys().asSequence().toList().sorted()
+        luaValues.text=luaKeys.joinToString("\n"){ k ->
+            val source=luaSources.optString(k,"?")
+            k+" = "+format(luaData.opt(k))+"  ["+source+"; "+age(luaTimes.optString(k,""))+"]"
+        }.ifEmpty{"Brak ramek z danymi Lua; oczekuję pasywnie na 04-04 lub 04-05"}
+        for(key in listOf("compRunFreq","fanSpeed","tempTwin","tempTwout",
+                           "pressureHigh","pressureLow","SysInstantPower",
+                           "SysInstantCopEER","fgDefrost","waterFlow")){
+            val value=if(luaData.has(key))format(luaData.opt(key)) else "—"
+            setTile(key,value,"Lua "+luaSources.optString(key,"04-05"),
+                    luaTimes.optString(key,""))
         }
-        if (diagnostic) lastDiagnostic = now else lastStatus = now
-        return true
+        val cloud=diag.optJSONObject("cloud")?:JSONObject()
+        val luaMeta=cloud.optJSONObject("values")
+        cloudResult.text=when(cloud.optString("status")){
+            "received"->"Odebrano profil dla ${luaMeta?.optString("model")}"+
+                " • ${luaMeta?.optInt("luaSize")} B\nSHA256: ${luaMeta?.optString("luaSha256")}"
+            "error"->"Błąd: "+cloud.optString("note")
+            "checking"->"Pobieranie pliku protokołu…"
+            else->"Nie sprawdzono"
+        } + (luaSavedName?.let{"\nZapisano: "+it+" — dołącz plik do czatu"}?:"")
+        val logs=snap.optJSONArray("events")?:JSONArray()
+        events.text=(maxOf(0,logs.length()-20) until logs.length()).joinToString("\n"){
+            logs.optString(it)
+        }
+        if(snap.optBoolean("running")){
+            state.text=if(snap.optBoolean("available"))
+                "Pompa ONLINE • X01/X05/X07 • ${snap.optInt("presentCount")} pól"
+            else "Ponowne łączenie z pompą…"
+        }
     }
-    private fun <T> runTask(message: String, task: () -> T, success: (T) -> Unit,
-                            failure: (Throwable) -> Unit) {
-        if (busy) return
-        busy = true
-        statusText.text = message
-        executor.submit {
-            val result = runCatching(task)
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                busy = false
-                result.fold(onSuccess = success, onFailure = failure)
+    private fun export(){
+        job("Przygotowanie raportu JSON i surowych ramek"){
+            val live=getPython().getModule("midea_bridge").callAttr("export_snapshot").toString()
+            val cfg=try{SecurePumpSettings.load(this)}catch(_:Exception){null}
+            val payload=if(JSONObject(live).optBoolean("running"))live
+                else cfg?.let{MonitorService.archived(this,it.deviceId)}?:live
+            onUI {
+                pendingDiagnosticsJson=JSONObject(payload).toString(2)
+                val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type="application/json"
+                    putExtra(Intent.EXTRA_TITLE,"MideaRemonte_2.4.1_background_diagnostic.json")
+                }
+                try {
+                    startActivityForResult(intent,requestSaveDiagnostics)
+                    state.text="Wybierz folder zapisu raportu JSON"
+                }catch(ex:Exception){
+                    pendingDiagnosticsJson=null
+                    state.text="Nie można otworzyć okna zapisu JSON"
+                }
             }
         }
     }
-    private fun export(p: Pump) {
-        exportText = Telemetry.report(snapshot, source, fetchedAt, p.sn8,
-            lastCode, errorEndpoint, errorAt, rawX10)
-            .put("luaUnitDiagnostics", luaSnapshot.values)
-            .put("luaUnitDiagnosticsFetchedAt", luaFetchedAt)
-            .put("luaUnitDiagnosticsFields", luaSnapshot.fields.size)
-            .put("wifi", org.json.JSONObject().put("receivedFields",lanSnapshot.fields.size)
-                .put("responseType",lanResultType)
-                .put("rawFrames",JSONArray().apply {
-                    lanFrames.forEach { f -> put(org.json.JSONObject()
-                        .put("request",f.request).put("direction",f.direction).put("receivedAt",f.receivedAt).put("messageType",f.messageType)
-                        .put("subtype",f.subtype).put("size",f.size)
-                        .put("checksumValid",f.checksumOk)
-                        .put("hexPrefix",f.rawPrefixHex).put("truncated",f.truncated)) }
-                })
-                .put("fieldSources",JSONObject(lanSources)).put("fieldReceivedAt",JSONObject(lanTimes))
-                .put("values",lanSnapshot.values).put("readAt",lanFetchedAt)
-                .put("result",lanStatus).put("steps",JSONArray(lanSteps)))
-            .put("cloudTests", JSONArray(cloudChecks)).toString(2)
-        @Suppress("DEPRECATION")
-        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.7.1.json")
-        }, 10)
-    }
-    @Deprecated("Native activity result API")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 10 && resultCode == RESULT_OK) {
-            val uri = data?.data ?: return
-            feedback = try {
-                contentResolver.openOutputStream(uri)?.use { it.write(exportText.toByteArray(Charsets.UTF_8)) }
-                    ?: error("Brak dostępu do pliku")
-                "Raport został zapisany."
-            } catch (_: Exception) { "Nie udało się zapisać raportu." }
-            statusText.text = feedback
-        }
-        exportText = ""
-    }
-    private fun logout() {
-        cloud.clear()
-        secrets.forget()
-        currentAccount = ""; savedPassword = ""; rememberLogin = true
-        rememberedPumpId = null; selected = null; devices = emptyList()
-        feedback = "Zapisane dane konta i wybór pompy zostały usunięte."
-        loginScreen(message = feedback)
-    }
-    @Deprecated("Native back navigation")
-    override fun onBackPressed() {
-        if (selected != null && tab != 0 && !busy) { tab = 0; dashboard() }
-        else super.onBackPressed()
-    }
-    override fun onDestroy() {
-        lanCancelled.set(true)
-        executor.submit { cloud.clear() }
-        executor.shutdown()
+    override fun onDestroy(){
+        active=false
+        pendingLuaPath?.let{File(it).delete()}
+        handler.removeCallbacks(tick)
+        work.shutdownNow()
+        statusWork.shutdownNow()
+        wifiLock?.let{if(it.isHeld)it.release()}
+        // A foreground service owns the LAN session and network binding.
+        // NEVER stop the device or unbind process Wi-Fi when Activity dies.
         super.onDestroy()
     }
 }
-
