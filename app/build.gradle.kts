@@ -6,8 +6,8 @@ android {
         applicationId = "pl.zuza.midearemote.lua24"
         minSdk = 26
         targetSdk = 35
-        versionCode = 240
-        versionName = "2.4.0-lua-telemetry"
+        versionCode = 241
+        versionName = "2.4.1-background-monitor"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
