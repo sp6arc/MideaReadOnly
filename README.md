@@ -1,19 +1,38 @@
-# MideaRemonte 1.1.0
+# MideaRemonte 2.0.0 – ORYGINALNY SILNIK PYTHON
 
-Independent Android application identity: `pl.zuza.midearemote`; source on dedicated branch `midearemote-initial`.
-Current MideaReadOnly on `main` is not modified.
+Dostarczamy oryginalny, NIEMODYFIKOWANY pakiet Python `midealan` z repozytorium
+https://github.com/wuwentao/midea-lan
 
-## Features
-- Midea C3 UDP discovery (send 6445/20086, listen 7083/15000), manual IP/device ID.
-- SmartHome login, list user C3 devices, obtain V3 LAN token/key for device ID.
-- Local TCP V2/V3, 8370 handshake, message and transport encryption, heartbeat, retries, partial frame buffering.\n- Upstream-style checked C3 protocol stages: await A0 before sending X01 → X09 → X05 → X07 → X10; query-matching timeouts (5s), periodic refresh of responders, and no overlapping outstanding requests.\n- No phantom X0A line in failure summary (0x10 is X10, decimal 10 is X0A).
-- C3 read-only A0, X01, X09, X05, X07, X10, selected X0D and X04/X05/X00 notifications.
-- Model-gated 17100007 X00 decoder: 2010, 20B0, 2F10. Legacy X10 decoding for 171H120F.
-- Raw shortened frame prefixes, plain all-field listing, diagnostic steps, JSON export.
-- Cloud basic status, query_type=16 and transparent X10 read-only diagnostic.
-- No controls, no Home Assistant/Modbus, no additional hardware.
+Punkt kontrolny upstream:
+`061df03f27a409bddaa5f5f50e371de5c00098b5` (2026-10-30)
 
-## Important limitations
-This is a focused Android port of C3 diagnostics, **not a full port** of every appliance and cloud from upstream wuwentao/midea-lan. The current cloud login is SmartHome. X00 notification subscriptions/push generation are firmware-dependent. The 17100007 decoder does not invent missing fields or unsupported queries. A separate upstream confirmed issue #1137 shows 171H120F sometimes never replies to X10 even when the original Python client and identical query bytes are used: https://github.com/wuwentao/midea_ac_lan/issues/1137 Installer APK is produced using GitHub Actions.
+CI pobiera ten konkretny commit, kopiuje `midealan/` bez zmian i pakuje przez
+Chaquopy 17.2.0/Python 3.12. `app/src/main/python/midea_bridge.py` wyłącznie
+wywołuje oryginalne publiczne metody pakietu i konwertuje wyniki do JSON;
+`MainActivity.kt` tylko pokazuje wartości.
 
-Upstream MIT sources: https://github.com/wuwentao/midea-lan (C3 message.py, security.py, device.py), https://github.com/wuwentao/midea-lua.
+Wykorzystywane metody autora:
+- `midealan.discover.discover` – UDP bez własnych ramek
+- `midealan.cloud.get_midea_cloud`, `login`, `get_cloud_keys`
+- `midealan.devices.device_selector`
+- `MideaDevice.open` -> `run` -> `connect(check_protocol=True)`
+- `refresh_status(True)`, oryginalna kolejność zapytań, timeouts, heartbeat,
+  ponowne połączenie, oryginalne dekodery C3/X10/X00.
+
+W aplikacji pokazujemy wyłącznie atrybuty zarejestrowane przez prawdziwe
+odpowiedzi/notify. Żadnych sztucznie wypełnianych pól.
+
+## Budowanie
+`./scripts/fetch-upstream.sh`, potem `./gradlew :app:testDebugUnitTest :app:assembleDebug`
+przy zainstalowanym Android SDK 35, Python 3.12 i JDK 17.
+GitHub Actions wykonuje wszystko automatycznie.
+
+## Ograniczenia
+APK nie jest dowodem na kompatybilność firmware 171H120F z X10.
+Zgłoszenie autora: https://github.com/wuwentao/midea_ac_lan/issues/1137
+Wystąpienie tego samego błędu na niezmienionym silniku Python jest istotnym
+wynikiem diagnostycznym, a nie dowodem na brak telemetrii w LetsLink.
+
+Implementacja Android zachowuje WYŁĄCZNIE funkcje odczytowe w UI.
+Pakiet autora zawiera również metody zapisu/sterowania, ale nie są one
+wywoływane. Upstream nie jest biblioteką serwisową LetsLink.
