@@ -1,4 +1,4 @@
-# MideaRemonte 2.2.0 — tylko działające protokoły
+# MideaRemonte 2.3.0 — działające protokoły + eksport oryginalnego Lua
 
 Projekt Android do monitorowania Midea M-Thermal R32, urządzenie typu C3,
 moduł Wi-Fi 171H120F. Zbudowany z oryginalnej, niemodyfikowanej biblioteki
@@ -12,8 +12,15 @@ commit `061df03f27a409bddaa5f5f50e371de5c00098b5`.
 - X07 (03-07): cyklicznie ECO
 - 04-04 (spontaniczny raport): stan ogrzewania, temperatura zewnętrzna,
   sumaryczne liczniki energii — **nie musi przychodzić cyklicznie**.
-- Cloud Lua: pobranie od Midea pliku protokołu dla przypisanego C3,
-  tylko metadane długość/SHA256/model, bez pobierania temperatur w chmurze.
+- Cloud Lua: pobranie od Midea pliku protokołu przypisanego do C3.
+  Przycisk `Pobierz oryginalny plik Lua i ZAPISZ .lua` otwiera
+  systemowy dokumentowy dialog Android i kopiuje *dokładnie oryginalne bajty*
+  do wskazanego przez użytkownika folderu, np. Pobrane.
+  Zapis jest weryfikowany przez SHA-256 zgodne z pobranym plikiem.
+  Nie wykonujemy kodu Lua, nie dodajemy żadnych danych logowania.
+  **Sam Lua może zawierać identyfikatory protokołu lub dane producenta**;
+  przed publikacją publiczną warto go sprawdzić.
+  Zachowany przycisk metadanych: rozmiar/SHA256/model.
 
 ## Wyłączone
 
@@ -47,7 +54,7 @@ potwierdzimy skali i poprawności. `status_heating` to ostatni raport
 
 ## Instalacja i budowa
 
-APK 2.2.0 ma osobny `applicationId=pl.zuza.midearemote.working`,
+APK 2.3.0 ma osobny `applicationId=pl.zuza.midearemote.luaexport`,
 aby uniknąć konfliktów podpisu debugowego. Może współistnieć ze starą
 MideaRemonte 2.0.1 i TESTY 2.1.0. Starszą TESTY można odinstalować;
 nie uruchamiaj więcej niż jednego monitora naraz.
