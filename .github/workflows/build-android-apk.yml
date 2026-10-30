@@ -62,7 +62,7 @@ jobs:
       - name: Upload complete APK
         uses: actions/upload-artifact@v4
         with:
-          name: MideaRemonte-2.0.1-ORIGINAL-PYTHON-APK
+          name: MideaRemonte-2.1.0-DIAGNOSTICS-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
@@ -77,29 +77,29 @@ jobs:
       - name: Download APK built and verified by read-only job
         uses: actions/download-artifact@v4
         with:
-          name: MideaRemonte-2.0.1-ORIGINAL-PYTHON-APK
+          name: MideaRemonte-2.1.0-DIAGNOSTICS-APK
           path: release
       - name: Prepare APK and ZIP
         run: |
           set -euo pipefail
           test -s release/app-debug.apk
-          mv release/app-debug.apk release/MideaRemonte-2.0.1.apk
-          (cd release && zip -9 MideaRemonte-2.0.1-APK.zip MideaRemonte-2.0.1.apk)
-          sha256sum release/MideaRemonte-2.0.1.apk
+          mv release/app-debug.apk release/MideaRemonte-2.1.0.apk
+          (cd release && zip -9 MideaRemonte-2.1.0-APK.zip MideaRemonte-2.1.0.apk)
+          sha256sum release/MideaRemonte-2.1.0.apk
       - name: Publish public download links on GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="v2.0.1-midearemonte"
+          tag="v2.1.0-midearemonte"
           if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" -R "$GITHUB_REPOSITORY" \
               --target midearemonte-python-upstream \
-              --title "MideaRemonte 2.0.1 – original midea-lan Python" \
-              --notes "APK for Android with the original, unchanged wuwentao/midea-lan (2026.10.0) engine. Read-only interface. Debug-signed prerelease; real-device diagnostic testing ongoing." \
+              --title "MideaRemonte 2.1.0 – read-only C3 diagnostic cards" \
+              --notes "APK for Android with the original, unchanged wuwentao/midea-lan (2026.10.0) engine. Read-only interface. Experimental one-shot read-only C3 diagnostic probes (X10, 04-05, 03-02-01, 2F10, 2F12, X08, X0A, X0D, Cloud Lua), plus original unmodified Python baseline. Debug-signed prerelease; actual device compatibility not guaranteed." \
               --prerelease
           fi
           gh release upload "$tag" \
-            release/MideaRemonte-2.0.1.apk \
-            release/MideaRemonte-2.0.1-APK.zip \
+            release/MideaRemonte-2.1.0.apk \
+            release/MideaRemonte-2.1.0-APK.zip \
             -R "$GITHUB_REPOSITORY" --clobber
