@@ -41,6 +41,10 @@ class MainActivity : Activity() {
     private lateinit var found: Spinner
     private var pumpList = JSONArray()
     private var lastSnapshot = JSONObject()
+    private var lastDiagnostic = JSONObject()
+    private val diagDisplays = mutableMapOf<String,TextView>()
+    private val tabPanes = mutableMapOf<String, LinearLayout>()
+    private var selectedTab = "BASE"
     private var active = true
     private var refreshing = false
     private var wifiNetwork: Network? = null
@@ -98,10 +102,65 @@ class MainActivity : Activity() {
         button(outer,"URUCHOM silnik autora (LAN)") { startMonitor() }
         button(outer,"Zatrzymaj odczyt") { stopMonitor() }
         button(outer,"Eksportuj raport bez haseł i tokenów") { export() }
-        heading(outer,"Oryginalne parametry z pompy")
-        values=line(outer,"Brak odczytów",13)
-        heading(outer,"Dziennik biblioteki")
-        events=line(outer,"Brak operacji",12)
+        heading(outer,"5. Karty testow diagnostycznych — TYLKO ODCZYT")
+        line(outer,"Kazdy test ma osobna karte. Zapytania lokalne wysylaja JEDNA ramke typu QUERY 03, nigdy sterowanie 02. Wyniki sa eksperymentalne: nie zmieniaja ustawien pompy.",12)
+        val tabScroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=true }
+        val tabRow=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        tabScroll.addView(tabRow)
+        outer.addView(tabScroll)
+        val tabs=listOf(
+            "BASE" to "Baza LAN",
+            "X10" to "X10",
+            "PUSH" to "04-05",
+            "ITS" to "ITS 02",
+            "PAGE10" to "2F10",
+            "PAGE12" to "2F12",
+            "X08" to "X08",
+            "X0A" to "X0A",
+            "X0D" to "X0D",
+            "CLOUD" to "Cloud Lua"
+        )
+        val panes=LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+        outer.addView(panes)
+        tabs.forEach { (key, title) ->
+            val tabButton=Button(this).apply {
+                text=title
+                textSize=12f
+                isAllCaps=false
+                setOnClickListener { showTab(key) }
+            }
+            tabRow.addView(tabButton,LinearLayout.LayoutParams(px(110),px(49)))
+            val pane=LinearLayout(this).apply {
+                orientation=LinearLayout.VERTICAL
+                visibility=if(key=="BASE") android.view.View.VISIBLE else android.view.View.GONE
+            }
+            tabPanes[key]=pane
+            panes.addView(pane)
+            if(key=="BASE"){
+                heading(pane,"Oryginalne parametry z pompy")
+                values=line(pane,"Brak odczytow",13)
+                heading(pane,"Dziennik biblioteki")
+                events=line(pane,"Brak operacji",12)
+            } else {
+                heading(pane,title)
+                val notes=when(key) {
+                    "X10" -> "Standard 03-10: odczyt czestotliwosci, T3/T4/Tp i cisnien. Wczesniej timeout."
+                    "PUSH" -> "120 sekund nasluchu spontanicznego raportu 04-05. ZERO wysylanych zapytan."
+                    "ITS" -> "Eksperymentalne 03-02-01 z innego OEM C3 (iletcomfort). To NIE jest standardowy format M-Thermal."
+                    "PAGE10" -> "Eksperymentalna strona 2F10 z modelu 17100007. Rozpoznanie odpowiedzi wymaga zgodnego naglowka."
+                    "PAGE12" -> "Eksperymentalna strona 2F12: moc elektryczna z modelu 17100007."
+                    "X08" -> "Odczyt konfiguracji INSTALL przez 03-08. Nie wysyla zmian ustawien."
+                    "X0A" -> "Odczyt parametrow kontrolera HMI przez 03-0A."
+                    "X0D" -> "Diagnostyczny 03-0D, zarejestrowany dla innych kontrolerow C3."
+                    else -> "Sprawdzenie profilu Lua pobranego z konta Midea SmartHome; nie jest to odczyt telemetrii na zywo."
+                }
+                line(pane,notes,13)
+                button(pane,"Uruchom pojedynczy test: $title"){runDiagnostic(key)}
+                val view=line(pane,"Jeszcze nie testowano",13)
+                diagDisplays[key]=view
+            }
+        }
+        line(outer,"Eksport zawiera wyniki wszystkich kart. Hasla, tokeny, numery seryjne i pelne ramki nie sa eksportowane.",12)
 
         job("Weryfikacja pakietu Python") {
             val py=getPython()
@@ -115,6 +174,23 @@ class MainActivity : Activity() {
             }
         }
         handler.postDelayed(tick,1800)
+    }
+
+    private fun showTab(key:String){
+        selectedTab=key
+        tabPanes.forEach { (id,pane) ->
+            pane.visibility=if(id==key) android.view.View.VISIBLE else android.view.View.GONE
+        }
+    }
+    private fun runDiagnostic(name:String) {
+        job("Test diagnostyczny $name") {
+            bindWifi()
+            val reply=getPython().getModule("midea_bridge").callAttr("diagnostic_probe",name).toString()
+            onUI {
+                diagDisplays[name]?.text=reply + "\\nOczekiwanie na odpowiedz; wynik zostanie zaktualizowany automatycznie."
+                state.text=reply
+            }
+        }
     }
 
     private fun getPython():Python {
@@ -233,8 +309,10 @@ class MainActivity : Activity() {
                         if(!Python.isStarted())return@execute
                         val json=getPython().getModule("midea_bridge").callAttr("snapshot").toString()
                         val snap=JSONObject(json)
+                        val diag=JSONObject(getPython().getModule("midea_bridge").callAttr("diagnostic_snapshot").toString())
                         lastSnapshot=snap
-                        onUI{render(snap)}
+                        lastDiagnostic=diag
+                        onUI{render(snap); renderDiagnostic(diag)}
                     }catch(_:Exception){}finally{refreshing=false}
                 }
             }
@@ -260,9 +338,35 @@ class MainActivity : Activity() {
                 " · protokół wiadomości "+snap.optInt("messageProtocol")
         else state.text.toString()
     }
+    private fun renderDiagnostic(diag:JSONObject){
+        val tests=diag.optJSONObject("tests")?:JSONObject()
+        diagDisplays.forEach { (id,view) ->
+            val result=tests.optJSONObject(id)
+            if(result!=null){
+                val pretty=buildString {
+                    append("Metoda: ").append(result.optString("title")).append("\\n")
+                    append("Stan: ").append(result.optString("status")).append("\\n")
+                    append("Start: ").append(result.optString("started")).append("\\n")
+                    append(result.optString("note")).append("\\n")
+                    val values=result.optJSONObject("values")?:JSONObject()
+                    if(values.length()>0){
+                        append("\\nODCZYTANE DANE:\\n")
+                        values.keys().asSequence().toList().sorted().forEach { k ->
+                            append(k).append(" = ").append(values.opt(k)).append("\\n")
+                        }
+                    }
+                    val response=result.optJSONObject("response")
+                    if(response!=null) append("\\nRAMKA: ").append(response.toString()).append("\\n")
+                }
+                view.text=pretty
+            }
+        }
+    }
+
     private fun export(){
         val obj=JSONObject(lastSnapshot.toString())
         obj.put("application","MideaRemonte")
+        obj.put("diagnostics",lastDiagnostic)
         obj.put("upstream","wuwentao/midea-lan")
         obj.put("upstreamRevision","061df03f27a409bddaa5f5f50e371de5c00098b5")
         val text=obj.toString(2)
