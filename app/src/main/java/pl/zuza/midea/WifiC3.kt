@@ -93,7 +93,7 @@ internal object WifiC3 {
         val model=runCatching { String(candidate,17,8,Charsets.US_ASCII).trim().filter{it.isLetterOrDigit()} }.getOrDefault("").take(8)
         // V3 outer discovery, or 5a5a with UDP v4 extension: prefer V3 on newer devices.
         val tail=41+u(candidate[40]); val udpVersion=if(candidate.size>=tail+8) uintLE(candidate,tail+4,4) else 0L
-        val v=if(udpVersion>=4) 4 else if(u(data[0])==0x83) 3 else 2
+        val v=if(udpVersion>=4) 3 else if(u(data[0])==0x83) 3 else 2
         return LanPump(ip,port,id,type,v,model)
     }
     /** Broadcast is limited to the phone's connected Wi-Fi, and to Midea C3 responses. */
@@ -229,9 +229,10 @@ internal object WifiC3 {
         frame[29]=(-frame.drop(1).sumOf { u(it) }).toByte()
         return frame
     }
-    private fun queryC3(subType:Int):ByteArray {
-        require(subType in listOf(1,5,7,9,10,16)){"Tylko dozwolone zapytania C3"}
+    private fun queryC3(subType:Int, messageProtocolVersion:Int=0):ByteArray {
+        require(subType in listOf(1,5,7,9,10,13,16)){"Tylko dozwolone zapytania C3"}
         val frame=Crypto.unhex("aa0bc3000000000000030000")
+        frame[8]=messageProtocolVersion.toByte()
         frame[10]=subType.toByte()
         frame[11]=(-frame.drop(1).sumOf{u(it)}).toByte()
         return frame
@@ -325,108 +326,180 @@ internal object WifiC3 {
         return values
     }
 
-    /** Single authenticated LAN connection, with periodic C3 heartbeat. */
+    /**
+     * Staged checked probe matching upstream MideaDevice.refresh_status:
+     * A0 negotiation -> (C3 no init/capability query) -> C3 status family.
+     * Await a matching reply or timeout before building/sending the next request.
+     * Keep listening for unsolicited C3 notifications throughout the session.
+     */
     private fun pollOnce(context:Context, pump:LanPump, profile:String, credentials:Pair<ByteArray,ByteArray>?,
-        durationSeconds:Int = 30, cancelled:()->Boolean = {false},
+        durationSeconds:Int = 45, cancelled:()->Boolean = {false},
         progress:(LanResult,Int)->Unit = {_,_->}):LanResult {
         checkedIp(pump.host)
         require(pump.type==0xc3 && pump.protocol in 2..3)
         require(durationSeconds in 30..180)
         val net=network(context) ?: error("Brak połączenia telefonu z Wi-Fi")
-        val steps=mutableListOf("Wi-Fi: połączono", "Transport V${pump.protocol}; profil ${profile}",
-            "Sesja ${durationSeconds}s; X10 po A0/X01 i ponownie po inicjalizacji; dokładny heartbeat midea-lan")
+        val steps=mutableListOf(
+            "Wi-Fi: połączono",
+            "Transport V${pump.protocol}; profil ${profile.ifBlank { "nieustalony" }}",
+            "Tryb zgodny z midea-lan: A0 -> odpowiedź -> X01, X09, X05, X07, X10",
+            "Każde zapytanie: odpowiedź lub timeout 5s; brak nakładających się zapytań",
+            "Heartbeat co 10s; nasłuch X00/X04/X05 podczas całej sesji"
+        )
         val frames=mutableListOf<LanFrame>()
         val decoded=linkedMapOf<String,Number>()
-        val sources=linkedMapOf<String,String>();val times=linkedMapOf<String,String>()
+        val sources=linkedMapOf<String,String>()
+        val times=linkedMapOf<String,String>()
         val families=linkedSetOf<String>()
+        val unsupported=linkedSetOf<Int>()
+        val replies=linkedSetOf<Int>()
+        val statusFamily=listOf(1,9,5,7,16) +
+            (if(profile=="17100003" || profile=="171000AU") listOf(13) else emptyList())
+        val queued=java.util.ArrayDeque<Int>()
+        queued.add(0xA0)
         var raw=""
+        var pending:Int?=null
+        var pendingAt=0L
+        var attempt=0
+        var firstProbeAnswered=false
+        var initialStage=true
+        var messageProtocolVersion=0
+        var nextRefresh=Long.MAX_VALUE
+        fun label(sub:Int) = if(sub==0xA0) "A0" else "X%02X".format(sub)
+        fun note(message:String) { steps.add(message); if(steps.size>360) steps.removeAt(0) }
         fun snapshot()=LanResult(decoded.toMap(),raw,families.joinToString(" + ").ifEmpty{"brak"},
             steps.toList(),frames.toList(),sources.toMap(),times.toMap())
         val socket=Socket()
         try {
-            net.bindSocket(socket);socket.connect(InetSocketAddress(pump.host,pump.port),4000);socket.soTimeout=5000
-            steps.add("TCP: połączono")
-            val output=socket.getOutputStream();val reader=FrameReader(socket.getInputStream())
+            net.bindSocket(socket)
+            socket.connect(InetSocketAddress(pump.host,pump.port),4000)
+            socket.soTimeout=5000
+            note("TCP: połączono")
+            val output=socket.getOutputStream()
+            val reader=FrameReader(socket.getInputStream())
             val auth=if(pump.protocol==3){
                 val pair=credentials ?: error("Brak kluczy LAN z konta SmartHome")
                 AuthV3(pair.first,pair.second).also {
                     output.write(it.encode(pair.first,0));output.flush()
-                    it.authenticate(reader.read());steps.add("V3: uwierzytelniono")
+                    it.authenticate(reader.read());note("V3: uwierzytelniono")
                 }
             } else null
-            socket.soTimeout=1000
+            socket.soTimeout=600
             val start=android.os.SystemClock.elapsedRealtime()
             val end=start+durationSeconds*1000L
-            // Query order from the real 171H120F midea-lan integration.
-            // X09 can time out: allow 5s before moving to the next read-only query.
-            // Never have more than one query outstanding on this protocol.
-            val schedule=mutableListOf(
-                0L to 0xA0, 1500L to 1, 3500L to 16,
-                8500L to 9, 14000L to 5, 16000L to 7,
-                18500L to 16, 24500L to 10
-            )
-            if(durationSeconds>30) {
-                for(t in 30 until durationSeconds step 30) schedule.add(t*1000L to 1)
-                for(t in listOf(37000, 57000, 87000, 117000, 147000, 170000))
-                    if(t < durationSeconds*1000L-2000) schedule.add(t.toLong() to 16)
+            var lastHeartbeat=start
+            var lastProgress=start
+            fun send(sub:Int, retry:Boolean=false) {
+                val cmd=if(sub==0xA0) queryAppliance()
+                    else queryC3(sub,messageProtocolVersion)
+                val packet=packV2(pump.id,cmd)
+                output.write(auth?.encode(packet,6) ?: packet)
+                output.flush()
+                pending=sub
+                pendingAt=android.os.SystemClock.elapsedRealtime()
+                attempt=if(retry) attempt+1 else 1
+                frames.add(LanFrame(label(sub),if(sub==0xA0) 0xA0 else 3,
+                    sub,cmd.size,true,Crypto.hex(cmd.copyOfRange(0,minOf(cmd.size,12))),
+                    cmd.size>12,"TX"))
+                note("Wysłano ${label(sub)} (próba $attempt; wersja wiadomości $messageProtocolVersion)")
             }
-            schedule.sortBy { it.first }
-            var next=0;var lastProgress=0L;var lastHeartbeat=start
-            val replies=mutableSetOf<Int>()
+            fun completePending(answered:Boolean) {
+                val code=pending ?: return
+                if(answered) {
+                    replies.add(code)
+                    firstProbeAnswered=true
+                    note("${label(code)}: potwierdzona odpowiedź")
+                } else {
+                    unsupported.add(code)
+                    note("${label(code)}: timeout; brak pasującej odpowiedzi, pominięto w kolejnych odświeżeniach")
+                }
+                pending=null
+                attempt=0
+                if(code==0xA0) {
+                    statusFamily.forEach { queued.add(it) }
+                    note("A0 zakończono: przejście do zapytań C3")
+                }
+            }
             while(android.os.SystemClock.elapsedRealtime()<end && !cancelled()) {
                 val now=android.os.SystemClock.elapsedRealtime()
-                val elapsed=now-start
-                if(now-lastHeartbeat>=9000) {
+                if(now-lastHeartbeat>=10000) {
                     val hb=heartbeatPacket(pump.id)
-                    output.write(auth?.encode(hb,6) ?: hb)
-                    output.flush()
+                    output.write(auth?.encode(hb,6) ?: hb);output.flush()
                     lastHeartbeat=now
-                    steps.add("Heartbeat: podtrzymano połączenie TCP")
+                    note("Heartbeat: utrzymanie sesji")
                 }
-                if(next<schedule.size && elapsed>=schedule[next].first) {
-                    val sub=schedule[next++].second
-                    val cmd=if(sub==0xA0) queryAppliance() else queryC3(sub)
-                    val label=if(sub==0xA0) "A0" else "X%02X".format(sub)
-                    val packet=packV2(pump.id,cmd)
-                    output.write(auth?.encode(packet,6) ?: packet);output.flush()
-                    frames.add(LanFrame(label,if(sub==0xA0) 0xA0 else 3,sub,
-                        cmd.size,true,Crypto.hex(cmd.copyOfRange(0,minOf(cmd.size,12))),
-                        cmd.size>12,"TX"))
-                    steps.add("Wysłano $label (tylko odczyt)")
+                if(pending!=null && now-pendingAt>=5000) {
+                    if(!firstProbeAnswered && attempt<2) {
+                        note("${label(pending!!)}: pierwszy timeout, ponowienie próby inicjalnej")
+                        send(pending!!,retry=true)
+                    } else completePending(false)
                 }
+                if(pending==null && queued.isEmpty()) {
+                    if(initialStage) {
+                        initialStage=false
+                        nextRefresh=now+30000
+                        note("Pierwszy przebieg zakończony; obsługiwane zapytania: " +
+                            statusFamily.filter { it in replies }.joinToString(",") { label(it) } +
+                            "; nieobsługiwane lub bez odpowiedzi: " +
+                            statusFamily.filter { it in unsupported }.joinToString(",") { label(it) })
+                    } else if(now>=nextRefresh) {
+                        statusFamily.filter { it !in unsupported }.forEach { queued.add(it) }
+                        nextRefresh=now+30000
+                        note("Okresowe odświeżenie rozpoznanych zapytań")
+                    }
+                }
+                if(pending==null && queued.isNotEmpty()) send(queued.removeFirst())
                 try {
                     val wire=reader.read()
                     val packet=auth?.decode(wire) ?: wire
-                    // V2 heartbeat/ack carries no C3 payload.
                     if(packet.size>=6 && (u(packet[2]) or (u(packet[3]) shl 8)) in listOf(0x1001,0x0001)) continue
                     val body=unpackV2(packet,pump.id)
-                    if(body.size==1 && u(body[0])==0) continue // heartbeat ACK
+                    if(body.size==1 && u(body[0])==0) continue
                     val valid=frameValid(body)
-                    val mt=if(body.size>9)u(body[9]) else -1
-                    val sub=if(body.size>10)u(body[10]) else -1
+                    val mt=if(body.size>9) u(body[9]) else -1
+                    val sub=if(body.size>10) u(body[10]) else -1
                     val at=java.time.Instant.now().toString()
-                    val label=when(mt) {
+                    val x00cmd=if(sub==0 && mt==4) C3X00.command(body) else null
+                    val responseLabel=when(mt) {
                         0xA0 -> "appliance/A0"
-                        4 -> "notify/X%02X".format(sub)
+                        4 -> if(x00cmd!=null) "notify/X00/"+x00cmd else "notify/X%02X".format(sub)
                         5 -> "notify2/X%02X".format(sub)
                         else -> "reply/X%02X".format(sub)
                     }
-                    // A0 may include identifiers: never export its full payload.
                     val safePrefix=if(mt==0xA0) 11 else if(sub==16) 88 else 72
-                    frames.add(LanFrame(label,mt,sub,body.size,valid,
+                    frames.add(LanFrame(responseLabel,mt,sub,body.size,valid,
                         Crypto.hex(body.copyOfRange(0,minOf(body.size,safePrefix))),
                         body.size>safePrefix,"RX",at))
-                    if(frames.size>600) frames.removeAt(0)
-                    if(!valid) { steps.add("Odrzucono błędną sumę/długość C3");continue }
-                    if(mt==3 || mt==0xA0) replies.add(if(mt==0xA0) 0xA0 else sub)
+                    if(frames.size>650) frames.removeAt(0)
+                    if(!valid) { note("Odrzucono błędną ramkę C3"); continue }
+                    if(mt==0xA0 && body.size>8) {
+                        messageProtocolVersion=u(body[8])
+                        note("A0: wersja protokołu wiadomości = $messageProtocolVersion")
+                    }
                     try {
                         val values:Map<String,Number> = when {
+                            sub==0 && mt==4 -> C3X00.decode(body,profile)
                             sub==1 && mt in listOf(3,4,5) -> decodeBasicX01(body,profile)
                             sub==16 && mt in listOf(3,4,5) && body.size>=100 -> {
                                 raw=Crypto.hex(body.copyOfRange(0,minOf(body.size,88)))
                                 parseX10(body,profile)
                             }
                             mt==4 && sub in listOf(4,5) -> decodeNotification(body,profile)
+                            sub==13 && mt in listOf(3,4) && body.size>=50 -> {
+                                fun w(offset:Int)=(u(body[10+offset]) shl 8) or u(body[11+offset])
+                                val t=w(7)/10.0
+                                val tank=w(9)/10.0
+                                val dhw=u(body[39])
+                                val map=linkedMapOf<String,Number>(
+                                    "temp_tw_out" to t,
+                                    "tank_actual_temperature" to (if(tank>0) tank else t),
+                                    "instant_power0" to w(18),
+                                    "total_energy_consumption" to
+                                        ((u(body[46]) shl 16) or (u(body[47]) shl 8) or u(body[48]))
+                                )
+                                if(dhw in 0..1)map["status_dhw"]=dhw
+                                map
+                            }
                             mt==3 && sub==5 && body.size>=13 ->
                                 mapOf("lan_silence_mode" to (u(body[11]) and 1))
                             mt==3 && sub==7 && body.size>=13 ->
@@ -435,26 +508,33 @@ internal object WifiC3 {
                             else -> emptyMap()
                         }
                         if(values.isNotEmpty()) {
-                            decoded.putAll(values);families.add(label)
-                            values.keys.forEach { sources[it]=label;times[it]=at }
+                            decoded.putAll(values)
+                            families.add(responseLabel)
+                            values.keys.forEach { sources[it]=responseLabel;times[it]=at }
                         }
-                        steps.add("$label: ${body.size} B, rozpoznano ${values.size} pól")
-                    } catch(e:Exception) { steps.add("$label: błąd dekodera ${e.javaClass.simpleName}; zachowano ramkę") }
-                    if(steps.size>300) steps.removeAt(0)
+                        note("$responseLabel: ${body.size} B, rozpoznano ${values.size} pól")
+                    } catch(e:Exception) {
+                        note("$responseLabel: błąd dekodowania ${e.javaClass.simpleName}; ramka zachowana")
+                    }
+                    val waiting=pending
+                    if(waiting!=null &&
+                        ((waiting==0xA0 && mt==0xA0) ||
+                        (waiting!=0xA0 && mt==3 && sub==waiting))) completePending(true)
                 } catch(_:SocketTimeoutException) {
-                    // Keep partial transport bytes and keep listening until the session deadline.
+                    // Buffered frames remain in FrameReader between socket read timeouts.
                 }
                 if(android.os.SystemClock.elapsedRealtime()-lastProgress>=1000) {
                     lastProgress=android.os.SystemClock.elapsedRealtime()
                     progress(snapshot(),((end-lastProgress)/1000).coerceAtLeast(0).toInt())
                 }
             }
-            for(sub in listOf(0xA0,1,9,5,7,16,10)) if(sub !in replies)
-                steps.add((if(sub==0xA0) "A0" else "X%02X".format(sub)) + ": brak pasującej odpowiedzi w tej sesji")
-            steps.add(if(cancelled()) "Sesja zatrzymana; zachowano odebrane dane" else "Sesja zakończona")
+            if(pending!=null) note("${label(pending!!)}: sesja zakończona przed potwierdzeniem")
+            note(if(cancelled()) "Sesja zatrzymana; zachowano odebrane dane" else "Sesja zakończona")
+            note("Potwierdzone: " + replies.joinToString(",") { label(it) })
+            note("Bez odpowiedzi: " + unsupported.joinToString(",") { label(it) })
         } catch(e:Exception) {
-            steps.add("Przerwano sesję: ${e.javaClass.simpleName}; zachowano odebrane dane. Ponów nasłuch po ponownym połączeniu.")
-        } finally { runCatching{socket.close()} }
+            note("Błąd sesji: ${e.javaClass.simpleName}: ${e.message?.take(100)}")
+        } finally { runCatching { socket.close() } }
         return snapshot()
     }
     /** Longer monitoring uses several authenticated connections if firmware

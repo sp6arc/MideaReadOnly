@@ -1,9 +1,18 @@
-name: Midea ReadOnly — budowanie APK
+name: MideaRemonte — budowanie APK
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main, master, midearemote-initial]
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'gradlew'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - '.github/workflows/build-android-apk.yml'
+  pull_request:
+    branches: [main]
     paths:
       - 'app/**'
       - 'gradle/**'
@@ -32,7 +41,7 @@ jobs:
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Zbuduj APK 0.7.1
+      - name: Zbuduj APK MideaRemonte 1.1.0
         run: |
           chmod +x ./gradlew
           ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
@@ -45,7 +54,7 @@ jobs:
       - name: Udostępnij APK
         uses: actions/upload-artifact@v4
         with:
-          name: MideaReadOnly-0.7.1-debug-APK
+          name: MideaRemonte-1.1.0-debug-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
