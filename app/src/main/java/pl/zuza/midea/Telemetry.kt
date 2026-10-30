@@ -251,7 +251,7 @@ internal object Telemetry {
             ))
         }
         return obj(
-            "app" to "Midea ReadOnly 0.6.0",
+            "app" to "Midea ReadOnly 0.7.0",
             "source" to source,
             "fetchedAt" to fetchedAt,
             "measurementTimeKnown" to false,
