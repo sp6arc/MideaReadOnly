@@ -3,11 +3,11 @@ android {
     namespace = "pl.zuza.midea"
     compileSdk = 35
     defaultConfig {
-        applicationId = "pl.zuza.midearemote.luaexport"
+        applicationId = "pl.zuza.midearemote.lua24"
         minSdk = 26
         targetSdk = 35
-        versionCode = 230
-        versionName = "2.3.0-lua-export"
+        versionCode = 240
+        versionName = "2.4.0-lua-telemetry"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
