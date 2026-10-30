@@ -77,7 +77,7 @@ def set_cloud(cloud_name, username, password, device_id):
         _cloud_credentials = (cloud_name, username, password, int(device_id))
 
 
-async def _cloud_lua():
+async def _cloud_lua(include_bytes=False):
     with _lock:
         credentials = _cloud_credentials
     if credentials is None:
@@ -111,12 +111,48 @@ async def _cloud_lua():
                 content = source.read(2 * 1024 * 1024 + 1)
             if len(content) > 2 * 1024 * 1024:
                 raise ValueError("Plik Lua przekracza limit 2 MiB")
-    return {
+    metadata = {
         "luaReceived": True,
         "luaSize": len(content),
         "luaSha256": hashlib.sha256(content).hexdigest(),
         "model": str(matching.get("sn8") or matching.get("model") or "")[:16],
     }
+    return (metadata, content) if include_bytes else metadata
+
+
+def download_lua_file(cache_dir):
+    """Download EXACT cloud bytes into app-private cache, never into diagnostic JSON.
+
+    Android's Storage Access Framework will save these bytes to the destination
+    explicitly selected by the owner. Nothing from the authenticated session is
+    prepended or appended to the .lua. This module does NOT run downloaded Lua.
+    """
+    if not cache_dir or not os.path.isabs(cache_dir):
+        raise ValueError("Wymagany katalog cache aplikacji")
+    destination = os.path.join(os.path.realpath(cache_dir), "Midea_171H120F_cloud_protocol.lua")
+    partial = destination + ".part"
+    try:
+        metadata, content = asyncio.run(_cloud_lua(include_bytes=True))
+        if not content:
+            raise ValueError("Otrzymano pusty plik Lua")
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        with open(partial, "wb") as stream:
+            stream.write(content)
+        os.replace(partial, destination)
+    except Exception:
+        if os.path.exists(partial):
+            os.remove(partial)
+        raise
+    with _lock:
+        _cloud_state.clear()
+        _cloud_state.update({
+            "status": "received",
+            "values": metadata,
+            "receivedAt": _now(),
+            "note": "Pobrano oryginalny plik Lua; gotowy do zapisu w pamieci telefonu",
+        })
+    # Path stays inside this app; it is NEVER added to JSON diagnostic export.
+    return json.dumps({"path": destination, "metadata": metadata}, ensure_ascii=False)
 
 
 def cloud_profile():
