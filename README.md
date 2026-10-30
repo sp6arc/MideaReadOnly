@@ -1,3 +1,37 @@
+# MideaRemonte 2.4.0 — pasywna diagnostyka według oryginalnego Lua 171H120F
+
+Nowa gałąź projektu zachowuje całe działające połączenie Wi-Fi (oryginalne
+wuwentao/midea-lan, niezmieniony upstream) oraz poprzedni eksport pliku Lua.
+
+## Nowości 2.4.0
+
+- Pasywny dekoder odczytanych ramek 04-04, 04-05 i 03-10; żadne nowe
+  zapytania nie są wysyłane. X09 i X10 pozostają wyłączone.
+- Mapowanie bezpośrednio według Lua z chmury Midea JSON_VERSION=20,
+  SHA-256: 893adfc1122aff7eb58bcec21273c3719d68d60e5539a1f9cc3fc9be5722b0f5.
+- Obsługa sprężarki, temperatur, ciśnień, wentylatora, przepływu,
+  statusów i energii; z rozróżnieniem formatów 04-04 / 04-05 / 03-10.
+- Pokazujemy tylko pola z faktycznie odebranych bajtów i znacznik czasu
+  każdej wartości. Nie wymyślamy skalowania ciśnienia, mocy ani COP.
+- Bieżący licznik, długość i czas każdej odebranej rodziny ramek.
+- Zapis pełnego JSON przez systemowy wybór folderu. Eksport zawiera
+  do 30 ostatnich pełnych ramek 04-04 / 04-05 (hex) oraz ich parametry.
+  Nie eksportujemy pełnych ramek 03-10, które zawierają pola SN.
+- Testy Python dla ramek syntetycznych wykonywane w GitHub Actions
+  przed testami Kotlin i budowaniem APK.
+- Osobny identyfikator pakietu Android, więc wersja 2.4.0 może
+  współistnieć z 2.3.0. Nie uruchamiaj dwóch monitorów naraz.
+
+**Ważne:** schemat Lua oznacza, że dekoder wie, gdzie są pola, ale nie
+gwarantuje, że pompa emituje raport 04-05. Brak wartości w interfejsie
+oznacza brak zweryfikowanych bajtów z czujników, nie zero. Pełne dane
+eksportu mogą zawierać szczegóły techniczne systemu — przed publikacją
+publiczną należy je przejrzeć.
+
+## APK 2.4.0
+
+https://github.com/sp6arc/MideaReadOnly/releases/tag/v2.4.0-midearemonte
+
 # MideaRemonte 2.3.0 — działające protokoły + eksport oryginalnego Lua
 
 Projekt Android do monitorowania Midea M-Thermal R32, urządzenie typu C3,
