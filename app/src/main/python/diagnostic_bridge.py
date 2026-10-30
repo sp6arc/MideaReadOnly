@@ -250,3 +250,32 @@ def export_capture():
             "capturePolicy": "04-04/04-05 only; 03-10 raw excluded",
             "frameBytesPosition": "AA header, byte 9 type, byte 10 subtype",
         }
+
+
+def restore_archive(archive):
+    """Restore local telemetry after process death, never from a network payload.
+
+    Live values and timestamps win over older saved values; raw 03-10 and
+    credentials remain outside the persisted capture.
+    """
+    diagnostics = archive.get("diagnostics", {})
+    lua = diagnostics.get("luaDecoded", {})
+    raw = archive.get("rawLuaCapture", {})
+    with _lock:
+        for name, value in lua.get("values", {}).items():
+            if isinstance(name, str):
+                _lua_values.setdefault(name, value)
+        for name, timestamp in lua.get("updatesAt", {}).items():
+            if name in _lua_values and isinstance(timestamp,str):
+                _lua_times.setdefault(name, timestamp)
+        for name, source in lua.get("sources", {}).items():
+            if name in _lua_values and source in ("04-04","04-05","03-10"):
+                _lua_sources.setdefault(name, source)
+        for item in raw.get("rawFrames", [])[-30:]:
+            if isinstance(item, dict) and item.get("frame") in ("04-04","04-05"):
+                _raw_packets.append(item)
+        del _raw_packets[:-30]
+        for item in raw.get("luaDecodedPackets", [])[-100:]:
+            if isinstance(item, dict):
+                _lua_packets.append(item)
+        del _lua_packets[:-100]
