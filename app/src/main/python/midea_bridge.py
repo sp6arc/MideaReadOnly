@@ -290,7 +290,8 @@ def export_snapshot():
     base["diagnostics"] = json.loads(diagnostic_snapshot())
     with _lock:
         base["history"] = list(_history)
-    base["application"] = "MideaRemonte 2.2.0"
+    base["rawLuaCapture"] = diagnostic_bridge.export_capture()
+    base["application"] = "MideaRemonte 2.4.0"
     base["upstream"] = "wuwentao/midea-lan"
     base["upstreamRevision"] = "061df03f27a409bddaa5f5f50e371de5c00098b5"
     return json.dumps(base, ensure_ascii=False)
