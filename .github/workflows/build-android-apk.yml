@@ -1,4 +1,4 @@
-name: MideaRemonte 2.4 — Lua passive telemetry
+name: MideaRemonte 2.4.1 — background monitor and encrypted settings
 
 on:
   push:
@@ -25,7 +25,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: midearemonte-2-4-${{ github.ref }}
+  group: midearemonte-2-4-1-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -68,7 +68,7 @@ jobs:
       - name: Upload complete APK
         uses: actions/upload-artifact@v4
         with:
-          name: MideaRemonte-2.4.0-LUA-DIAGNOSTICS-APK
+          name: MideaRemonte-2.4.1-BACKGROUND-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
@@ -83,15 +83,15 @@ jobs:
       - name: Download APK built and verified by read-only job
         uses: actions/download-artifact@v4
         with:
-          name: MideaRemonte-2.4.0-LUA-DIAGNOSTICS-APK
+          name: MideaRemonte-2.4.1-BACKGROUND-APK
           path: release
       - name: Prepare APK and ZIP
         run: |
           set -euo pipefail
           test -s release/app-debug.apk
-          mv release/app-debug.apk release/MideaRemonte-2.4.0.apk
-          (cd release && zip -9 MideaRemonte-2.4.0-APK.zip MideaRemonte-2.4.0.apk)
-          sha256sum release/MideaRemonte-2.4.0.apk
+          mv release/app-debug.apk release/MideaRemonte-2.4.1.apk
+          (cd release && zip -9 MideaRemonte-2.4.1-APK.zip MideaRemonte-2.4.1.apk)
+          sha256sum release/MideaRemonte-2.4.1.apk
       - name: Publish public download links on GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,15 +102,15 @@ jobs:
             echo "Newer commit exists; do not publish this obsolete APK."
             exit 0
           fi
-          tag="v2.4.0-midearemonte"
+          tag="v2.4.1-midearemonte"
           if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" -R "$GITHUB_REPOSITORY" \
               --target midearemonte-python-upstream \
-              --title "MideaRemonte 2.4.0 – passive Lua 04-04 / 04-05 service telemetry" \
-              --notes "APK for Android with the original, unchanged wuwentao/midea-lan (2026.10.0) engine. Read-only interface. Only the verified X01/X05/X07 LAN polls and passive 04-04 energy messages, plus original cloud Lua file export via Android Save As and time-stamped history. X09/X10 and all experimental probes removed. The original upstream Python remains unmodified. Adds passive source-Lua decoding and bounded export of full 04-04/04-05 frames. No X10 probes. Debug-signed prerelease; actual device compatibility not guaranteed." \
+              --title "MideaRemonte 2.4.1 – always-on foreground monitor with encrypted credentials" \
+              --notes "APK for Android with the original, unchanged wuwentao/midea-lan (2026.10.0) engine. Read-only interface. Only the verified X01/X05/X07 LAN polls and passive 04-04 energy messages, plus original cloud Lua file export via Android Save As and time-stamped history. X09/X10 and all experimental probes removed. The original upstream Python remains unmodified. Adds passive source-Lua decoding, bounded full-frame export, an Android connectedDevice foreground service, CPU/Wi-Fi locks, Android Keystore encrypted saved login, 30-second private autosave and local recovery. No X10 probes. Debug-signed prerelease; actual device compatibility not guaranteed." \
               --prerelease
           fi
           gh release upload "$tag" \
-            release/MideaRemonte-2.4.0.apk \
-            release/MideaRemonte-2.4.0-APK.zip \
+            release/MideaRemonte-2.4.1.apk \
+            release/MideaRemonte-2.4.1-APK.zip \
             -R "$GITHUB_REPOSITORY" --clobber
