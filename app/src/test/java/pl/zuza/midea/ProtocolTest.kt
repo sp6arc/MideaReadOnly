@@ -230,7 +230,10 @@ class ProtocolTest {
         val hb=WifiC3.heartbeatPacket(123456L)
         assertEquals(0x5a,hb[0].toInt() and 255)
         assertEquals(0x5a,hb[1].toInt() and 255)
-        assertEquals(0,hb[6].toInt() and 255)
-        assertTrue(hb.size>=56)
+        assertEquals(0x10,hb[3].toInt() and 255)
+        assertEquals(0x7b,hb[6].toInt() and 255)
+        assertEquals(56,hb.size)
+        assertEquals(56,(hb[4].toInt() and 255) + (hb[5].toInt() and 255)*256)
+        assertEquals(0x5a,hb[0].toInt() and 255)
     }
 }

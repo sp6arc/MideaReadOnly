@@ -133,17 +133,23 @@ internal object WifiC3 {
         } finally { if(lock.isHeld)lock.release() }
         return candidates.values.toList()
     }
-    private fun packV2(id:Long, command:ByteArray, msgType:Int=0x20): ByteArray {
+    private fun packV2(id:Long, command:ByteArray, msgType:Int=1): ByteArray {
         require(id in 1..0xffffffffffffL)
+        require(msgType in 0..1) { "Only read-only request and heartbeat packets permitted" }
+        require(msgType==1 || command.isEmpty()) { "Heartbeat must not carry a command" }
         val h=ByteArray(40)
-        h[0]=0x5a; h[1]=0x5a;h[2]=1;h[3]=0x11;h[6]=msgType.toByte()
+        h[0]=0x5a; h[1]=0x5a;h[2]=1
+        h[3]=if(msgType==1) 0x11 else 0x10
+        h[6]=if(msgType==1) 0x20 else 0x7b
         for(i in 0..7)h[20+i]=(id ushr (8*i)).toByte()
         // Date/time bytes as specified in Midea PacketBuilder.
         val now=java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC)
-        val stamp="%04d%02d%02d%02d%02d%02d00".format(java.util.Locale.US,now.year,now.monthValue,now.dayOfMonth,now.hour,now.minute,now.second)
+        val stamp="%04d%02d%02d%02d%02d%02d%02d".format(
+            java.util.Locale.US,now.year,now.monthValue,now.dayOfMonth,
+            now.hour,now.minute,now.second,now.nano/10_000_000)
         for(i in 0..7)h[12+i]=stamp.substring(i*2,i*2+2).toInt().toByte()
         for(i in 0..3) { val b=h[12+i];h[12+i]=h[19-i];h[19-i]=b }
-        val enc=aesEcb(command,true)
+        val enc=if(msgType==1) aesEcb(command,true) else byteArrayOf()
         val length=40+enc.size+16
         h[4]=length.toByte();h[5]=(length shr 8).toByte()
         val packet=h+enc
@@ -230,8 +236,9 @@ internal object WifiC3 {
         frame[11]=(-frame.drop(1).sumOf{u(it)}).toByte()
         return frame
     }
-    /** Exact midea-lan heartbeat: V2 message type 0 and a single 0x00 payload. */
-    internal fun heartbeatPacket(id:Long):ByteArray = packV2(id,byteArrayOf(0),0)
+    /** Exact midea-lan heartbeat: unsigned V2 body is empty, header 5A5A0110 / 7B, total 56 bytes.
+     * PacketBuilder.finalize(msg_type=0) does not append any C3 command or AES block. */
+    internal fun heartbeatPacket(id:Long):ByteArray = packV2(id,byteArrayOf(),0)
     private fun parseX10(body:ByteArray, id:String):Map<String,Int> {
         require(body.size>63 && u(body[0])==0xaa && u(body[2])==0xc3 && u(body[10])==0x10){"Brak odpowiedzi X10"}
         require((u(body[9]) in listOf(3,4)) && body.drop(1).sumOf{u(it)} and 255==0){"Niepoprawna suma X10"}
@@ -327,7 +334,7 @@ internal object WifiC3 {
         require(durationSeconds in 30..180)
         val net=network(context) ?: error("Brak połączenia telefonu z Wi-Fi")
         val steps=mutableListOf("Wi-Fi: połączono", "Transport V${pump.protocol}; profil ${profile}",
-            "Sesja ${durationSeconds}s; A0 → X01 → X09 → X05 → X07 → X10 → X0A; nasłuch X04/X05")
+            "Sesja ${durationSeconds}s; X10 po A0/X01 i ponownie po inicjalizacji; dokładny heartbeat midea-lan")
         val frames=mutableListOf<LanFrame>()
         val decoded=linkedMapOf<String,Number>()
         val sources=linkedMapOf<String,String>();val times=linkedMapOf<String,String>()
@@ -354,8 +361,9 @@ internal object WifiC3 {
             // X09 can time out: allow 5s before moving to the next read-only query.
             // Never have more than one query outstanding on this protocol.
             val schedule=mutableListOf(
-                0L to 0xA0, 1500L to 1, 3000L to 9, 8500L to 5,
-                10500L to 7, 12500L to 16, 20500L to 10
+                0L to 0xA0, 1500L to 1, 3500L to 16,
+                8500L to 9, 14000L to 5, 16000L to 7,
+                18500L to 16, 24500L to 10
             )
             if(durationSeconds>30) {
                 for(t in 30 until durationSeconds step 30) schedule.add(t*1000L to 1)

@@ -688,7 +688,7 @@ class MainActivity : Activity() {
         }
         card(root){ c ->
             title(c,"Diagnostyka lokalna")
-            caption(c,"Wersja 0.7.0: odczyt według midea-lan, heartbeat co 9 s, automatyczne ponowne łączenie i nasłuch X04/X05. Dane sprężarki wyłącznie przy odebraniu diagnostyki X10/X05.")
+            caption(c,"Wersja 0.7.1: dokładny format heartbeat midea-lan; X10 najpierw po A0/X01, ponownie po inicjalizacji. Odczyty wyłącznie z rzeczywistych ramek X10/X05.")
             spacing(c,9)
             action(c,"Odczyt Wi-Fi · 30 sekund",primary=true){ readLan(30) }
             action(c,"Odczyt serwisowy • 3 minuty (zalecane)",primary=true){ readLan(180) }
@@ -844,7 +844,7 @@ class MainActivity : Activity() {
             spacing(c, 6)
             caption(c, "Nie uruchamiamy Home Assistant ani Modbus. Lokalny odczyt korzysta wyłącznie z fabrycznego Wi-Fi. Bez zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.7.0 • C3 midea-lan: heartbeat, reconnect, X10 i powiadomienia")
+            caption(c, "Wersja 0.7.1 • X10: poprawna ramka heartbeat i dwie próby diagnostyki")
         }
     }
 
@@ -956,7 +956,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.7.0.json")
+            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.7.1.json")
         }, 10)
     }
     @Deprecated("Native activity result API")

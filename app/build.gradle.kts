@@ -6,8 +6,8 @@ android {
         applicationId = "pl.zuza.midea.readonly"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.7.0-native-c3"
+        versionCode = 10
+        versionName = "0.7.1-x10"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
