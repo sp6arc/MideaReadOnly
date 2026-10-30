@@ -244,8 +244,12 @@ def snapshot():
     return json.dumps(status, ensure_ascii=False)
 
 
-def diagnostic_probe(name):
+def diagnostic_probe(name, cloud_name="", username="", password="", appliance_id=""):
     """One read-only documented command, or passive listening/cloud Lua."""
+    if name == "CLOUD":
+        if not (username and password and appliance_id):
+            raise ValueError("Dla Cloud Lua podaj login, haslo oraz Device ID")
+        diagnostic_bridge.set_cloud(cloud_name, username, password, int(appliance_id))
     return diagnostic_bridge.probe(name)
 
 
