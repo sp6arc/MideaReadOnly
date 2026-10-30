@@ -6,8 +6,8 @@ android {
         applicationId = "pl.zuza.midearemote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 201
-        versionName = "2.0.1-upstream"
+        versionCode = 210
+        versionName = "2.1.0-diagnostics"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
