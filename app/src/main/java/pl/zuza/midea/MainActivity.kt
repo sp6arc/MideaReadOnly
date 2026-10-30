@@ -27,7 +27,7 @@ import java.time.OffsetDateTime
 import java.util.concurrent.Executors
 
 /**
- * MideaRemonte 2.2.0: read-only monitor for confirmed LAN C3 queries.
+ * MideaRemonte 2.4.0: passive raw telemetry, confirmed LAN C3 polls.
  * Original wuwentao/midea-lan transport, V3 authentication and decoder.
  * Only X01, X05 and X07 polls; passive X04 energy notifications.
  */
@@ -42,6 +42,7 @@ class MainActivity : Activity() {
     private lateinit var events: TextView
     private lateinit var frames: TextView
     private lateinit var cloudResult: TextView
+    private lateinit var luaValues: TextView
     private lateinit var counters: TextView
     private lateinit var host: EditText
     private lateinit var port: EditText
@@ -54,6 +55,8 @@ class MainActivity : Activity() {
     private lateinit var found: Spinner
     private var pumpList = JSONArray()
     private val requestSaveLua = 2301
+    private val requestSaveDiagnostics = 2402
+    private var pendingDiagnosticsJson: String? = null
     @Volatile private var luaDownloadInProgress = false
     private var pendingLuaPath: String? = null
     private var pendingLuaHash: String? = null
@@ -139,7 +142,7 @@ class MainActivity : Activity() {
         val scroll=ScrollView(this).apply{isFillViewport=true}
         scroll.addView(outer)
         setContentView(scroll)
-        val brand=label(outer,"MideaRemonte 2.2",24f,true)
+        val brand=label(outer,"MideaRemonte 2.4",24f,true)
         brand.setTextColor(accent)
         label(outer,"MONITORING POTWIERDZONYCH ODCZYTÓW • TYLKO ODCZYT",11f)
         version=label(outer,"Ładowanie biblioteki Midea…",12f)
@@ -155,6 +158,13 @@ class MainActivity : Activity() {
         label(outer,"¹ Surowe liczniki z 04-04. Jednostki i skala nie są jeszcze zweryfikowane; nie obliczamy COP.",11f)
         counters=label(outer,"Odebrane pola: 0 · Historia: 0 próbek",13f,true)
 
+        heading(outer,"Diagnostyka serwisowa z Lua — pasywny odczyt")
+        label(outer,"Źródło: oryginalny Lua 171H120F. Raporty 04-04 i 04-05 tylko odbieramy; nie wysyłamy nowych poleceń. Wartości surowe, jeśli jednostka nie została potwierdzona.",12f)
+        tileRow(outer,"Sprężarka (raw)" to "compRunFreq","Wentylator (x10)" to "fanSpeed")
+        tileRow(outer,"Woda wejście" to "tempTwin","Woda wyjście" to "tempTwout")
+        tileRow(outer,"Ciśnienie wysokie (raw)" to "pressureHigh","Ciśnienie niskie (raw)" to "pressureLow")
+        tileRow(outer,"Pobór chwilowy (raw)" to "SysInstantPower","COP/EER (raw)" to "SysInstantCopEER")
+        tileRow(outer,"Odszranianie" to "fgDefrost","Przepływ wody (raw)" to "waterFlow")
         heading(outer,"Połączenie z pompą")
         host=field(outer,"IP pompy (puste = wykryj)", "")
         button(outer,"Wykryj pompę przez Wi-Fi"){discover()}
@@ -195,11 +205,13 @@ class MainActivity : Activity() {
         label(outer,"Po zapisaniu pliku wybierz w ChatGPT: + → Pliki → wybierz .lua. Pobieramy oryginalny plik bez zmian; nie uruchamiamy jego kodu.",12f)
         cloudResult=label(outer,"Nie sprawdzono pliku Lua",13f)
 
+        heading(outer,"Pola dekodowane na podstawie Lua")
+        luaValues=label(outer,"Brak pasywnej ramki 04-04 / 04-05 / 03-10",12f)
         heading(outer,"Wszystkie odebrane pola")
         values=label(outer,"Brak danych",12f)
         heading(outer,"Historia i eksport")
-        button(outer,"Eksportuj odczyty i historię (JSON)"){export()}
-        label(outer,"Eksport obejmuje znaczniki czasu, ostatnie wartości i do 800 ostatnich próbek. Bez haseł, tokenów, numerów seryjnych i surowych ramek.",12f)
+        button(outer,"ZAPISZ diagnostykę Lua + surowe ramki (JSON)"){export()}
+        label(outer,"Eksportuje do pliku JSON: dane, ostatnie 800 próbek i pełne bajty odebranych ramek 04-04/04-05 (maks. 30). Ramki 03-10 z numerami seryjnymi nie są eksportowane. Przed publicznym udostępnieniem sprawdź plik.",12f)
         heading(outer,"Zdarzenia")
         events=label(outer,"Brak zdarzeń",11f)
 
@@ -354,6 +366,29 @@ class MainActivity : Activity() {
     @Deprecated("Android document picker result")
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
         super.onActivityResult(requestCode,resultCode,data)
+        if(requestCode==requestSaveDiagnostics){
+            val payload=pendingDiagnosticsJson
+            pendingDiagnosticsJson=null
+            val uri=data?.data
+            if(resultCode!=RESULT_OK || uri==null || payload==null){
+                state.text="Zapis raportu anulowany"
+                return
+            }
+            work.execute{
+                try {
+                    val stream=contentResolver.openOutputStream(uri,"w")
+                        ?:throw IllegalStateException("Nie można otworzyć pliku")
+                    stream.use{it.write(payload.toByteArray(Charsets.UTF_8)); it.flush()}
+                    onUI {
+                        state.text="Raport Lua / surowe ramki zapisany ("+payload.length+" znaków)"
+                        Toast.makeText(this,"Dołącz zapisany plik JSON do rozmowy.",Toast.LENGTH_LONG).show()
+                    }
+                }catch(ex:Exception){
+                    onUI{state.text="Błąd zapisu diagnostyki: "+ex.javaClass.simpleName}
+                }
+            }
+            return
+        }
         if(requestCode!=requestSaveLua)return
         val path=pendingLuaPath
         val expected=pendingLuaHash
@@ -487,10 +522,27 @@ class MainActivity : Activity() {
         counters.text="Pola odebrane: ${snap.optInt("presentCount")} / ${snap.optInt("allCount")}"+
             " • Historia: ${snap.optInt("observationsCount")} próbek"
         val stats=diag.optJSONObject("frameStats")?:JSONObject()
-        frames.text=listOf("03-01","03-05","03-07","04-04").joinToString("\n"){key->
+        frames.text=listOf("03-01","03-05","03-07","04-03","04-04","04-05","03-10").joinToString("\n"){key->
             val row=stats.optJSONObject(key)
             "$key: ${row?.optInt("count")?:0} pakietów"+
+                (row?.optInt("lastBytes",0)?.takeIf{it>0}?.let{" • $it B"}?:"")+
                 (row?.optString("lastSeen")?.let{" • "+age(it)}?:"")
+        }+"\nPełne ramki do eksportu: "+diag.optInt("rawFramesStored",0)+" (tylko 04-04/04-05)"
+        val lua=diag.optJSONObject("luaDecoded")?:JSONObject()
+        val luaData=lua.optJSONObject("values")?:JSONObject()
+        val luaTimes=lua.optJSONObject("updatesAt")?:JSONObject()
+        val luaSources=lua.optJSONObject("sources")?:JSONObject()
+        val luaKeys=luaData.keys().asSequence().toList().sorted()
+        luaValues.text=luaKeys.joinToString("\n"){ k ->
+            val source=luaSources.optString(k,"?")
+            k+" = "+format(luaData.opt(k))+"  ["+source+"; "+age(luaTimes.optString(k,""))+"]"
+        }.ifEmpty{"Brak ramek z danymi Lua; oczekuję pasywnie na 04-04 lub 04-05"}
+        for(key in listOf("compRunFreq","fanSpeed","tempTwin","tempTwout",
+                           "pressureHigh","pressureLow","SysInstantPower",
+                           "SysInstantCopEER","fgDefrost","waterFlow")){
+            val value=if(luaData.has(key))format(luaData.opt(key)) else "—"
+            setTile(key,value,"Lua "+luaSources.optString(key,"04-05"),
+                    luaTimes.optString(key,""))
         }
         val cloud=diag.optJSONObject("cloud")?:JSONObject()
         val lua=cloud.optJSONObject("values")
@@ -512,14 +564,22 @@ class MainActivity : Activity() {
         }
     }
     private fun export(){
-        job("Przygotowanie raportu JSON z historią"){
+        job("Przygotowanie raportu JSON i surowych ramek"){
             val json=getPython().getModule("midea_bridge").callAttr("export_snapshot").toString()
-            onUI{
-                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply{
+            onUI {
+                pendingDiagnosticsJson=JSONObject(json).toString(2)
+                val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
                     type="application/json"
-                    putExtra(Intent.EXTRA_TEXT,JSONObject(json).toString(2))
-                },"Eksport potwierdzonych odczytów"))
-                state.text="Raport gotowy do udostępnienia"
+                    putExtra(Intent.EXTRA_TITLE,"MideaRemonte_2.4.0_Lua_diagnostic.json")
+                }
+                try {
+                    startActivityForResult(intent,requestSaveDiagnostics)
+                    state.text="Wybierz folder zapisu raportu JSON"
+                }catch(ex:Exception){
+                    pendingDiagnosticsJson=null
+                    state.text="Nie można otworzyć okna zapisu JSON"
+                }
             }
         }
     }
