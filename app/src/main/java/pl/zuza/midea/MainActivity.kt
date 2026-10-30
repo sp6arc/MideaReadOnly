@@ -545,10 +545,10 @@ class MainActivity : Activity() {
                     luaTimes.optString(key,""))
         }
         val cloud=diag.optJSONObject("cloud")?:JSONObject()
-        val lua=cloud.optJSONObject("values")
+        val luaMeta=cloud.optJSONObject("values")
         cloudResult.text=when(cloud.optString("status")){
-            "received"->"Odebrano profil dla ${lua?.optString("model")}"+
-                " • ${lua?.optInt("luaSize")} B\nSHA256: ${lua?.optString("luaSha256")}"
+            "received"->"Odebrano profil dla ${luaMeta?.optString("model")}"+
+                " • ${luaMeta?.optInt("luaSize")} B\nSHA256: ${luaMeta?.optString("luaSha256")}"
             "error"->"Błąd: "+cloud.optString("note")
             "checking"->"Pobieranie pliku protokołu…"
             else->"Nie sprawdzono"
