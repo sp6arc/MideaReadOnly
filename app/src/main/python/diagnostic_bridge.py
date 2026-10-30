@@ -209,7 +209,7 @@ def probe(name):
                     note="Odczytano metadane/chmurowy profil, NIE biezaca telemetrie")
         except Exception as err:
             with _lock:
-                state.update(status="error",note=f"Cloud Lua: {type(err).__name__}: {str(err)[:130]}")
+                state.update(status="error",note=f"Cloud Lua: {type(err).__name__}" + (f": {err}" if type(err) is ValueError else " (szczegoly chmury ukryte)"))
         return "Cloud Lua: sprawdzono"
     if name=="PUSH":
         return "Nasluch 04-05 aktywny na 360 s; bez wysylania polecen"
