@@ -150,6 +150,8 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         _events.clear()
         _last_error = ""
     _event("Start: oryginalna biblioteka Python " + UPSTREAM_VERSION)
+    if len(model.strip()) < 6 or model.strip() == str(port).strip():
+        raise ValueError("Nieprawidłowy model/SN8: użyj odczytu discover(), np. 171H120F, a nie portu TCP")
     appliance_id = int(id_text)
     transport = ProtocolVersion(int(protocol))
     if transport == ProtocolVersion.V3:
@@ -184,17 +186,15 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         if dev is None:
             raise RuntimeError("Oryginalny device_selector nie obsługuje C3")
         dev.register_update(_on_update)
-        _event(f"Próba autoryzacji LAN {index}/{len(candidates)} — oryginalny connect()")
-        if not dev.connect():
-            _event("Oryginalny connect(): brak uwierzytelnienia; kolejny klucz")
+        _event(f"Próba autoryzacji LAN {index}/{len(candidates)} — oryginalny connect(check_protocol=True)")
+        # This is the exact method used by the upstream MideaDevice._connect_loop.
+        # It performs refresh_status(True) AND set_available(connected).
+        # Calling connect() and refresh_status(True) separately left
+        # 'available' permanently false despite valid incoming updates.
+        if not dev.connect(check_protocol=True):
+            _event("Oryginalny connect(check_protocol=True): brak potwierdzenia; kolejny klucz")
             continue
-        try:
-            _event("Oryginalny refresh_status(True): sprawdzam obsługę zapytań")
-            dev.refresh_status(True)
-        except (AuthException, NoSupportedProtocol, OSError) as err:
-            _event(f"Sprawdzanie protokołu: {type(err).__name__}; następny klucz")
-            dev.close_socket()
-            continue
+        _event("Oryginalny connect(check_protocol=True): sprzęt online; etapy diagnostyki zakończone")
         with _lock:
             if _session != session:
                 dev.close_socket()
