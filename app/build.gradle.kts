@@ -3,7 +3,7 @@ android {
     namespace = "pl.zuza.midea"
     compileSdk = 35
     defaultConfig {
-        applicationId = "pl.zuza.midearemote.diagnostics"
+        applicationId = "pl.zuza.midearemote.working"
         minSdk = 26
         targetSdk = 35
         versionCode = 220
