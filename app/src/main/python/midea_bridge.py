@@ -1,7 +1,9 @@
-"""Android adapter only. The upstream midealan package is copied UNMODIFIED at build time.
+"""Android adapter for the three verified C3 query families on 171H120F.
 
-Protocol, query ordering, decryptors, cloud and C3 decoding are provided by
-wuwentao/midea-lan. This adapter only converts calls/results to JSON.
+Original upstream transport, authentication, codecs and threading are intact.
+The per-device request filter intentionally omits failing X09 and X10.
+Passive 04-04 energy notifications and full-fidelity decoded sample history
+are recorded. No SET commands, full frames, credentials or serials exported.
 """
 import asyncio
 import json
@@ -25,6 +27,8 @@ _device = None
 _events = []
 _changed_at = {}
 _last_values = {}
+_history = []
+_max_history = 800
 _last_error = ""
 _session = 0
 _max_events = 350
@@ -53,11 +57,27 @@ def _display(value):
 
 def _on_update(update):
     stamp = datetime.now(timezone.utc).isoformat()
+    if "total_energy_consumption" in update:
+        source = "04-04"
+    elif "zone1_power" in update:
+        source = "03-01"
+    elif "silent_level" in update:
+        source = "03-05"
+    elif "eco_function_state" in update:
+        source = "03-07"
+    else:
+        source = None
     with _lock:
-        for k, v in update.items():
-            _last_values[str(k)] = _display(v)
-            _changed_at[str(k)] = stamp
-    _event(f"Zaktualizowano {len(update)} pól przez oryginalny dekoder")
+        values = {str(k): _display(v) for k, v in update.items()}
+        for k, v in values.items():
+            _last_values[k] = v
+            _changed_at[k] = stamp
+        if source is not None:
+            _history.append({"at": stamp, "source": source, "values": values})
+            if len(_history) > _max_history:
+                del _history[:len(_history) - _max_history]
+    if source == "04-04":
+        _event("Odebrano raport 04-04: status, temperatura i liczniki energii")
 
 
 class _BridgeLog(logging.Handler):
@@ -139,9 +159,7 @@ def stop():
 
 
 def start_monitor(host, port, id_text, model, protocol, cloud_name, username, password):
-    """Start ORIGINAL MideaDevice.run() thread (connect+auth+refresh_status(True)).
-    No Kotlin X10, no custom retries, no altered query schedule.
-    """
+    """Start original connection with only working C3 status polls enabled."""
     global _device, _session, _last_error
     stop()
     with _lock:
@@ -149,6 +167,7 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         session = _session
         _last_values.clear()
         _changed_at.clear()
+        _history.clear()
         _events.clear()
         _last_error = ""
     _event("Start: oryginalna biblioteka Python " + UPSTREAM_VERSION)
@@ -165,11 +184,8 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         raise ValueError("Autor nie otrzymał żadnych kluczy/tokenów")
     _event(f"Przygotowano {len(candidates)} zestawów kluczy; bez ujawniania ich wartości")
 
-    # Faithful copy of MideaCLI.discover():
-    # test candidate auth keys with dev.connect(), then refresh_status(True)
-    # before entering the original 30s refresh/heartbeat/reconnect thread.
-    # All protocol behavior remains inside the original MideaDevice.
-    from midealan.device import NoSupportedProtocol, AuthException
+    # Original connect/auth/heartbeat/reconnect. A narrow adapter filter
+    # disables unsuccessful X09/X10 polls before the FIRST checked pass.
     for index, candidate in enumerate(candidates.values(), start=1):
         dev = device_selector(
             name="MideaRemonte C3",
@@ -188,7 +204,7 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         if dev is None:
             raise RuntimeError("Oryginalny device_selector nie obsługuje C3")
         dev.register_update(_on_update)
-        # Passive observation only: original decoder runs unchanged.
+        # Preserve upstream decoder and V3 security; filter outgoing C3 polls.
         diagnostic_bridge.attach(dev)
         _event(f"Próba autoryzacji LAN {index}/{len(candidates)} — oryginalny connect(check_protocol=True)")
         # This is the exact method used by the upstream MideaDevice._connect_loop.
@@ -226,6 +242,8 @@ def snapshot():
     # The upstream constructor initializes many bools to False, and those
     # must NOT be presented as measured values before a response arrives.
     present = {k: values[k] for k in times if k in values and values[k] is not None}
+    with _lock:
+        observations = len(_history)
     status = {
         "running": bool(dev.is_alive()),
         "available": bool(dev.available),
@@ -238,37 +256,56 @@ def snapshot():
         "allCount": len(values),
         "values":present,
         "updatesAt":times,
+        "observationsCount": observations,
+        "queriesEnabled": ["X01", "X05", "X07"],
         "events":events,
         "error":error
     }
     return json.dumps(status, ensure_ascii=False)
 
 
-def diagnostic_probe(name, cloud_name="", username="", password="", appliance_id=""):
-    """One read-only documented command, or passive listening/cloud Lua."""
-    if name == "CLOUD":
-        if not (username and password and appliance_id):
-            raise ValueError("Dla Cloud Lua podaj login, haslo oraz Device ID")
-        diagnostic_bridge.set_cloud(cloud_name, username, password, int(appliance_id))
-    return diagnostic_bridge.probe(name)
+def cloud_profile(cloud_name, username, password, appliance_id):
+    """Download ONLY the Lua codec metadata for the selected user's C3."""
+    if not (username and password and appliance_id):
+        raise ValueError("Podaj login, haslo i Device ID do Cloud Lua")
+    diagnostic_bridge.set_cloud(cloud_name, username, password, int(appliance_id))
+    return diagnostic_bridge.cloud_profile()
 
 
 def diagnostic_snapshot():
     return diagnostic_bridge.snapshot()
 
 
+def export_snapshot():
+    """Export measured values with timestamps + bounded decoded history."""
+    base = json.loads(snapshot())
+    base["diagnostics"] = json.loads(diagnostic_snapshot())
+    with _lock:
+        base["history"] = list(_history)
+    base["application"] = "MideaRemonte 2.2.0"
+    base["upstream"] = "wuwentao/midea-lan"
+    base["upstreamRevision"] = "061df03f27a409bddaa5f5f50e371de5c00098b5"
+    return json.dumps(base, ensure_ascii=False)
+
+
 def selfcheck():
-    # Check that requests/decoders/transport exist in the ACTUAL upstream code.
     from midealan.device import MideaDevice
-    from midealan.devices.c3.message import MessageQueryUnitPara
+    from midealan.devices.c3.message import (
+        MessageQueryBasic, MessageQuerySilence, MessageQueryECO
+    )
     from midealan.packet_builder import PacketBuilder
     from midealan.security import LocalSecurity
-    query = MessageQueryUnitPara(0).serialize().hex()
+    queries = [
+        MessageQueryBasic(0).serialize().hex(),
+        MessageQuerySilence(0).serialize().hex(),
+        MessageQueryECO(0).serialize().hex(),
+    ]
     return json.dumps({
-        "version":UPSTREAM_VERSION,
-        "x10":query,
+        "version": UPSTREAM_VERSION,
+        "queries": queries,
+        "disabledQueries": ["X09", "X10"],
         "upstreamMideaDevice": MideaDevice.__module__,
-        "upstreamPacketBuilder":PacketBuilder.__module__,
-        "upstreamLocalSecurity":LocalSecurity.__module__,
-        "doesNotPatchUpstream":True
-    })
+        "upstreamPacketBuilder": PacketBuilder.__module__,
+        "upstreamLocalSecurity": LocalSecurity.__module__,
+        "upstreamPackageModified": False,
+    }, ensure_ascii=False)
