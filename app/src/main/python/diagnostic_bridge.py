@@ -29,7 +29,7 @@ _registered = False
 
 METHODS = {
     "X10": {"title": "Standard C3 / X10", "query": bytes([0x10]), "reply": (3, 0x10), "timeout": 20},
-    "PUSH": {"title": "Nasluch 04-05 bez zapytan", "query": None, "reply": (4, 5), "timeout": 120},
+    "PUSH": {"title": "Nasluch 04-05 bez zapytan", "query": None, "reply": (4, 5), "timeout": 360},
     "ITS": {"title": "ITS / BTRI 03-02-01", "query": bytes([0x02, 0x01]), "reply": (3, 2), "timeout": 20},
     "PAGE10": {"title": "Strona 2F10", "query": bytes.fromhex("00 2F 10 FF 1C FF FF 00 FF FF"), "reply": (3, 0), "timeout": 20},
     "PAGE12": {"title": "Strona 2F12", "query": bytes.fromhex("00 2F 12 FF 1C FF FF 00 FF FF"), "reply": (3, 0), "timeout": 20},
@@ -212,7 +212,7 @@ def probe(name):
                 state.update(status="error",note=f"Cloud Lua: {type(err).__name__}: {str(err)[:130]}")
         return "Cloud Lua: sprawdzono"
     if name=="PUSH":
-        return "Nasluch 04-05 aktywny na 120 s; bez wysylania polecen"
+        return "Nasluch 04-05 aktywny na 360 s; bez wysylania polecen"
     # Single bounded, documented QUERY only. Never SET/CONTROL (0x02).
     from midealan.message import MessageQuestCustom
     query=MessageQuestCustom(DeviceType.C3, dev._message_protocol_version,
@@ -268,7 +268,7 @@ def snapshot():
         for name, state in _state.items():
             if state.get("status")=="waiting" and now>=state["_deadline"]:
                 state["status"] = "no_response"
-                state["note"] = ("Nie zaobserwowano 04-05 w 120 s"
+                state["note"] = ("Nie zaobserwowano 04-05 w 360 s"
                     if name=="PUSH" else "Brak pasujacej odpowiedzi w oknie czasowym")
         result={}
         for name,state in _state.items():
