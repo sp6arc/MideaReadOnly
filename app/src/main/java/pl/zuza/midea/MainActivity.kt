@@ -145,14 +145,14 @@ class MainActivity : Activity() {
                 heading(pane,title)
                 val notes=when(key) {
                     "X10" -> "Standard 03-10: odczyt czestotliwosci, T3/T4/Tp i cisnien. Wczesniej timeout."
-                    "PUSH" -> "120 sekund nasluchu spontanicznego raportu 04-05. ZERO wysylanych zapytan."
+                    "PUSH" -> "360 sekund nasluchu spontanicznego raportu 04-05. ZERO wysylanych zapytan."
                     "ITS" -> "Eksperymentalne 03-02-01 z innego OEM C3 (iletcomfort). To NIE jest standardowy format M-Thermal."
                     "PAGE10" -> "Eksperymentalna strona 2F10 z modelu 17100007. Rozpoznanie odpowiedzi wymaga zgodnego naglowka."
                     "PAGE12" -> "Eksperymentalna strona 2F12: moc elektryczna z modelu 17100007."
                     "X08" -> "Odczyt konfiguracji INSTALL przez 03-08. Nie wysyla zmian ustawien."
                     "X0A" -> "Odczyt parametrow kontrolera HMI przez 03-0A."
                     "X0D" -> "Diagnostyczny 03-0D, zarejestrowany dla innych kontrolerow C3."
-                    else -> "Sprawdzenie profilu Lua pobranego z konta Midea SmartHome; nie jest to odczyt telemetrii na zywo."
+                    else -> "Odczyt profilu Lua z chmury SmartHome, niezalezny od polaczenia LAN. Wymaga Device ID i loginu; NIE jest odczytem telemetrii na zywo."
                 }
                 line(pane,notes,13)
                 button(pane,"Uruchom pojedynczy test: $title"){runDiagnostic(key)}
@@ -184,8 +184,11 @@ class MainActivity : Activity() {
     }
     private fun runDiagnostic(name:String) {
         job("Test diagnostyczny $name") {
-            bindWifi()
-            val reply=getPython().getModule("midea_bridge").callAttr("diagnostic_probe",name).toString()
+            if(name!="CLOUD") bindWifi()
+            val reply=getPython().getModule("midea_bridge").callAttr(
+                "diagnostic_probe",name, cloud.selectedItem.toString(),
+                account.text.toString().trim(),password.text.toString(),id.text.toString().trim()
+            ).toString()
             onUI {
                 diagDisplays[name]?.text=reply + "\\nOczekiwanie na odpowiedz; wynik zostanie zaktualizowany automatycznie."
                 state.text=reply
