@@ -354,7 +354,9 @@ class MainActivity : Activity() {
         root.addView(holder, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(15) })
         label(holder, "M-THERMAL   R32   •   ${pump.sn8}", 12, pale, true, 10)
         label(holder, modeName(), 26, white, true, 5)
-        label(holder, "Tryb wybrany na sterowniku, nie potwierdzenie pracy sprężarki", 11, pale)
+        label(holder, if(lanSnapshot.values.has("comp_run_freq")) {
+            "Sprężarka: ${lanSnapshot.values.optInt("comp_run_freq")} Hz · odczyt Wi-Fi"
+        } else "Tryb wybrany na sterowniku, nie potwierdzenie pracy sprężarki", 11, pale)
         spacing(holder, 18)
         val mainRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         holder.addView(mainRow)
@@ -445,6 +447,26 @@ class MainActivity : Activity() {
                 "Zasilanie Tw_out", diagValue("tempTwout", "temp_tw_out"), "Surowa temperatura")
             metricPair("Powrót Tw_in", diagValue("tempTwin", "temp_tw_in"), "Surowa temperatura",
                 "Wymiennik T3", diagValue("tempT3", "temp_t3"), "Surowa temperatura")
+        }
+        if (lanSnapshot.values.has("comp_run_freq")) {
+            val lan=lanSnapshot.values
+            fun valOrDash(key:String) = if(lan.has(key)) lan.optString(key) else "—"
+            section("Rzeczywista praca pompy", "Odczyt z fabrycznego Wi-Fi • X10 / powiadomienie X05")
+            metricPair("Sprężarka",valOrDash("comp_run_freq")+" Hz",
+                if(lan.optInt("comp_run_freq")>0)"Pracuje" else "Nie pracuje",
+                "Wentylator",valOrDash("fan_speed")+" obr./min","Pomiar z protokołu",
+                blue,Color.rgb(29,128,106))
+            metricPair("Zasilanie wody",valOrDash("temp_tw_out")+" °C","Tw_out",
+                "Powrót wody",valOrDash("temp_tw_in")+" °C","Tw_in")
+            metricPair("Wymiennik T2",valOrDash("temp_t2")+" °C","Pomiar",
+                "Wymiennik T3",valOrDash("temp_t3")+" °C","Pomiar")
+            card(root) { c ->
+                fieldRow(c,"Częstotliwość zadana",valOrDash("odu_target_fre")+" Hz")
+                fieldRow(c,"Ciśnienie wysokie (surowe)",valOrDash("pressure_high"))
+                fieldRow(c,"Ciśnienie niskie (surowe)",valOrDash("pressure_low"))
+                fieldRow(c,"Przepływ wody (surowe)",valOrDash("water_flow_raw"))
+                caption(c,"Zera to pomiary tylko przy odebranym X10/X05; brak pomiaru oznaczamy —. Ciśnienia wymagają potwierdzenia skali.")
+            }
         }
         section("Ciepła woda użytkowa", "Temperatura zasobnika a nastawa")
         metricPair("Woda w zasobniku", temp("tank_actual_temp"), "Odczyt SmartHome",
@@ -666,7 +688,7 @@ class MainActivity : Activity() {
         }
         card(root){ c ->
             title(c,"Diagnostyka lokalna")
-            caption(c,"Odczyt X01/X10/X0A oraz powiadomienia X04/X05. Nasłuch trwa 3 minuty; zostaw aplikację otwartą. Brak pomiaru nie oznacza zera.")
+            caption(c,"Wersja 0.6.1: sekwencja A0 / X01 / X09 / X05 / X07 / X10 / X0A z działającej implementacji 171H120F. Odczyt X10 i pasywne X04/X05; bez zmiany ustawień.")
             spacing(c,9)
             action(c,"Odczyt Wi-Fi · 30 sekund",primary=true){ readLan(30) }
             action(c,"Nasłuch diagnostyczny · 3 minuty",primary=true){ readLan(180) }
@@ -822,7 +844,7 @@ class MainActivity : Activity() {
             spacing(c, 6)
             caption(c, "Nie uruchamiamy Home Assistant ani Modbus. Lokalny odczyt korzysta wyłącznie z fabrycznego Wi-Fi. Bez zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.6.0 • Chmura + Wi-Fi · nasłuch X01/X04/X05/X10")
+            caption(c, "Wersja 0.6.1 • X10 — pełna inicjalizacja C3 i rozszerzone pomiary")
         }
     }
 
@@ -934,7 +956,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.6.0.json")
+            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.6.1.json")
         }, 10)
     }
     @Deprecated("Native activity result API")

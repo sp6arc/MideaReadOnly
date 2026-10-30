@@ -190,4 +190,39 @@ class ProtocolTest {
             .getJSONObject("values").has("unknown_c3_002"))
     }
 
+
+    @Test fun a0ApplianceProbeMatchesMideaLanWireFormat() {
+        val frame=WifiC3.queryAppliance()
+        assertEquals(30,frame.size)
+        assertEquals(0xaa,frame[0].toInt() and 255)
+        assertEquals(29,frame[1].toInt() and 255)
+        assertEquals(0xa0,frame[9].toInt() and 255)
+        assertEquals(0,frame.drop(1).sumOf { it.toInt() and 255 } and 255)
+        assertTrue(frame.copyOfRange(10,29).all { it.toInt()==0 })
+    }
+    @Test fun x10RealDeviceLayoutAndCompressorFrequency() {
+        // Reconstructed sanitized 211 B device reply: no tail SN or credentials.
+        val frame=ByteArray(211)
+        frame[0]=0xaa.toByte();frame[1]=210.toByte();frame[2]=0xc3.toByte()
+        frame[9]=3;frame[10]=16
+        fun b(i:Int,v:Int) { frame[11+i]=v.toByte() }
+        b(0,57);b(1,2);b(2,64) // 57 Hz, cooling, 640 RPM from wuwentao/midea-lan#51
+        b(7,26);b(9,30);b(10,36)
+        b(18,239);b(19,1);b(20,224) // EXV 480
+        b(35,30);b(36,33);b(42,6);b(43,204);b(44,8);b(45,52)
+        b(54,0);b(55,53) // 0.53 m3/h raw
+        frame[frame.lastIndex]=(-frame.drop(1).sumOf { it.toInt() and 255 }).toByte()
+        val v=C3.decode(frame,"171H120F")
+        assertEquals(57,v["comp_run_freq"])
+        assertEquals(1,v["compressor_on"])
+        assertEquals(640,v["fan_speed"])
+        assertEquals(26,v["temp_t4"])
+        assertEquals(36,v["temp_tw_out"])
+        assertEquals(30,v["temp_tw_in"])
+        assertEquals(239,v["odu_voltage"])
+        assertEquals(480,v["exv_current"])
+        assertEquals(1740,v["pressure_high"])
+        assertEquals(2100,v["pressure_low"])
+        assertEquals(53,v["water_flow_raw"])
+    }
 }

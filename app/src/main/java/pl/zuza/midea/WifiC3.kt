@@ -214,8 +214,17 @@ internal object WifiC3 {
             return plain.copyOfRange(2,plain.size-pad)
         }
     }
+    /** As in midea-lan: A0 appliance query precedes status queries.
+     * Exactly 19 zero body bytes, type 0xA0; never changes pump settings. */
+    internal fun queryAppliance(): ByteArray {
+        val frame=ByteArray(30)
+        frame[0]=0xaa.toByte();frame[1]=29;frame[2]=0xc3.toByte()
+        frame[9]=0xa0.toByte()
+        frame[29]=(-frame.drop(1).sumOf { u(it) }).toByte()
+        return frame
+    }
     private fun queryC3(subType:Int):ByteArray {
-        require(subType in listOf(1,10,16)){"Tylko dozwolone zapytania C3"}
+        require(subType in listOf(1,5,7,9,10,16)){"Tylko dozwolone zapytania C3"}
         val frame=Crypto.unhex("aa0bc3000000000000030000")
         frame[10]=subType.toByte()
         frame[11]=(-frame.drop(1).sumOf{u(it)}).toByte()
@@ -315,8 +324,8 @@ internal object WifiC3 {
         require(pump.type==0xc3 && pump.protocol in 2..3)
         require(durationSeconds in 30..180)
         val net=network(context) ?: error("Brak połączenia telefonu z Wi-Fi")
-        val steps=mutableListOf("Wi-Fi: połączono", "Transport V${pump.protocol}; protokół wiadomości 0",
-            "Sesja ${durationSeconds}s; zapytania X01/X10/X0A i ciągły odbiór powiadomień")
+        val steps=mutableListOf("Wi-Fi: połączono", "Transport V${pump.protocol}; profil ${profile}",
+            "Sesja ${durationSeconds}s; A0 → X01 → X09 → X05 → X07 → X10 → X0A; nasłuch X04/X05")
         val frames=mutableListOf<LanFrame>()
         val decoded=linkedMapOf<String,Number>()
         val sources=linkedMapOf<String,String>();val times=linkedMapOf<String,String>()
@@ -339,19 +348,32 @@ internal object WifiC3 {
             socket.soTimeout=1000
             val start=android.os.SystemClock.elapsedRealtime()
             val end=start+durationSeconds*1000L
-            // Initial baseline, one bounded X10 and HMI attempt; X01 keeps the session active.
-            val schedule=mutableListOf(0L to 1,3000L to 16,15000L to 10)
-            for(t in 30 until durationSeconds step 30) schedule.add(t*1000L to 1)
+            // Query order from the real 171H120F midea-lan integration.
+            // X09 can time out: allow 5s before moving to the next read-only query.
+            // Never have more than one query outstanding on this protocol.
+            val schedule=mutableListOf(
+                0L to 0xA0, 1500L to 1, 3000L to 9, 8500L to 5,
+                10500L to 7, 12500L to 16, 20500L to 10
+            )
+            if(durationSeconds>30) {
+                for(t in 30 until durationSeconds step 30) schedule.add(t*1000L to 1)
+                for(t in listOf(37000, 57000, 87000, 117000, 147000, 170000))
+                    if(t < durationSeconds*1000L-2000) schedule.add(t.toLong() to 16)
+            }
+            schedule.sortBy { it.first }
             var next=0;var lastProgress=0L
             val replies=mutableSetOf<Int>()
             while(android.os.SystemClock.elapsedRealtime()<end && !cancelled()) {
                 val elapsed=android.os.SystemClock.elapsedRealtime()-start
                 if(next<schedule.size && elapsed>=schedule[next].first) {
                     val sub=schedule[next++].second
-                    val cmd=queryC3(sub);val label="X%02X".format(sub)
+                    val cmd=if(sub==0xA0) queryAppliance() else queryC3(sub)
+                    val label=if(sub==0xA0) "A0" else "X%02X".format(sub)
                     val packet=packV2(pump.id,cmd)
                     output.write(auth?.encode(packet,6) ?: packet);output.flush()
-                    frames.add(LanFrame(label,3,sub,cmd.size,true,Crypto.hex(cmd),false,"TX"))
+                    frames.add(LanFrame(label,if(sub==0xA0) 0xA0 else 3,sub,
+                        cmd.size,true,Crypto.hex(cmd.copyOfRange(0,minOf(cmd.size,12))),
+                        cmd.size>12,"TX"))
                     steps.add("Wysłano $label (tylko odczyt)")
                 }
                 try {
@@ -364,12 +386,20 @@ internal object WifiC3 {
                     val mt=if(body.size>9)u(body[9]) else -1
                     val sub=if(body.size>10)u(body[10]) else -1
                     val at=java.time.Instant.now().toString()
-                    val label=if(mt==4) "notify/X%02X".format(sub) else "reply/X%02X".format(sub)
+                    val label=when(mt) {
+                        0xA0 -> "appliance/A0"
+                        4 -> "notify/X%02X".format(sub)
+                        5 -> "notify2/X%02X".format(sub)
+                        else -> "reply/X%02X".format(sub)
+                    }
+                    // A0 may include identifiers: never export its full payload.
+                    val safePrefix=if(mt==0xA0) 11 else if(sub==16) 88 else 72
                     frames.add(LanFrame(label,mt,sub,body.size,valid,
-                        Crypto.hex(body.copyOfRange(0,minOf(body.size,88))),body.size>88,"RX",at))
+                        Crypto.hex(body.copyOfRange(0,minOf(body.size,safePrefix))),
+                        body.size>safePrefix,"RX",at))
                     if(frames.size>600) frames.removeAt(0)
                     if(!valid) { steps.add("Odrzucono błędną sumę/długość C3");continue }
-                    if(mt==3) replies.add(sub)
+                    if(mt==3 || mt==0xA0) replies.add(if(mt==0xA0) 0xA0 else sub)
                     try {
                         val values:Map<String,Number> = when {
                             sub==1 && mt in listOf(3,4) -> decodeBasicX01(body,profile)
@@ -385,7 +415,7 @@ internal object WifiC3 {
                             values.keys.forEach { sources[it]=label;times[it]=at }
                         }
                         steps.add("$label: ${body.size} B, rozpoznano ${values.size} pól")
-                    } catch(e:IllegalArgumentException) { steps.add("$label: niepełny lub niezgodny profil") }
+                    } catch(e:Exception) { steps.add("$label: błąd dekodera ${e.javaClass.simpleName}; zachowano ramkę") }
                     if(steps.size>300) steps.removeAt(0)
                 } catch(_:SocketTimeoutException) {
                     // Keep partial transport bytes and keep listening until the session deadline.
@@ -395,10 +425,11 @@ internal object WifiC3 {
                     progress(snapshot(),((end-lastProgress)/1000).coerceAtLeast(0).toInt())
                 }
             }
-            for(sub in listOf(1,16,10)) if(sub !in replies) steps.add("X%02X: brak pasującej odpowiedzi w tej sesji".format(sub))
+            for(sub in listOf(0xA0,1,9,5,7,16,10)) if(sub !in replies)
+                steps.add((if(sub==0xA0) "A0" else "X%02X".format(sub)) + ": brak pasującej odpowiedzi w tej sesji")
             steps.add(if(cancelled()) "Sesja zatrzymana; zachowano odebrane dane" else "Sesja zakończona")
         } catch(e:Exception) {
-            steps.add("Przerwano sesję: ${e.javaClass.simpleName}; zachowano odebrane dane")
+            steps.add("Przerwano sesję: ${e.javaClass.simpleName}; zachowano odebrane dane. Ponów nasłuch po ponownym połączeniu.")
         } finally { runCatching{socket.close()} }
         return snapshot()
     }

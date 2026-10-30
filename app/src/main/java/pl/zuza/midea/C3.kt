@@ -32,18 +32,45 @@ internal object C3 {
         require((frame[9].toInt() and 255) in setOf(3,4) && (frame[10].toInt() and 255) == 0x10)
     }
     /** Unknown layouts are never interpreted using a different pump's offsets. Units stay raw. */
+    /** Layout verified against Midea's 171H120F Lua and vasicekmilan90-eng/midea-lan.
+     * Never interpret another SN8 using these offsets; null sensors are omitted. */
     fun decode(frame: ByteArray, sn8: String): Map<String, Int> {
         validateFrame(frame)
         require(sn8 == "171H120F") { "Odebrano X10; profil $sn8 nie jest zweryfikowany" }
-        require(frame.size >= 65) { "Niepełna odpowiedź X10" }
-        fun u(i: Int)=frame[11+i].toInt() and 255
-        fun word(i: Int)=(u(i) shl 8) + u(i+1)
-        return linkedMapOf(
-            "comp_run_freq" to u(0), "odu_target_fre" to u(48), "odu_comp_current" to u(16),
-            "temp_t2" to u(35), "temp_t2b" to u(36), "temp_t3" to u(6),
-            "temp_tp" to u(8), "temp_th" to u(46), "temp_tf" to u(51),
-            "pressure_high" to word(42), "pressure_low" to word(44),
-            "temp_tw_in" to u(9), "temp_tw_out" to u(10)
-        )
+        require(frame.size >= 100) { "Niepełna odpowiedź X10: ${frame.size} B" }
+        fun u(i: Int) = frame[11+i].toInt() and 255
+        fun word(i: Int) = (u(i) shl 8) + u(i+1)
+        val data=linkedMapOf<String,Int>()
+        fun value(name:String, raw:Int) { data[name]=raw }
+        fun temp(name:String, index:Int) {
+            val raw=u(index)
+            if(raw!=127 && raw!=255) data[name]=frame[11+index].toInt()
+        }
+        value("comp_run_freq",u(0))
+        value("compressor_on",if(u(0)>0) 1 else 0)
+        value("unit_mode_run",u(1))
+        value("fan_speed",u(2)*10) // RPM; 171H120F Lua byte 3
+        value("odu_comp_current",u(16))
+        value("odu_voltage",u(18))
+        value("exv_current",word(19))
+        value("odu_target_fre",u(48))
+        value("dc_current",u(49))
+        value("dc_bus_voltage",u(50)*10)
+        temp("temp_t3",6); temp("temp_t4",7); temp("temp_tp",8)
+        temp("temp_tw_in",9); temp("temp_tw_out",10)
+        temp("temp_t1",33); temp("temp_tw2",34)
+        temp("temp_t2",35); temp("temp_t2b",36)
+        temp("temp_t5",37); temp("temp_ta",38)
+        temp("temp_th",46); temp("temp_tf",51)
+        value("pressure_high",word(42))
+        value("pressure_low",word(44))
+        value("pump_i_running",if((u(32) and 0x08)!=0) 1 else 0)
+        value("water_flow_raw",word(54)) // 0.01 m3/h, retained raw
+        value("instant_power_raw",word(57))
+        value("water_pressure",word(61))
+        value("total_electricity0",word(68))
+        value("total_thermal0",word(72))
+        value("instant_power0",word(82))
+        return data
     }
 }
