@@ -5,6 +5,7 @@ on:
     branches: [midearemonte-python-upstream]
     paths:
       - 'app/**'
+      - 'README.md'
       - 'gradle/**'
       - 'gradlew'
       - 'build.gradle.kts'
