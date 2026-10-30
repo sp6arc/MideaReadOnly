@@ -272,6 +272,14 @@ def cloud_profile(cloud_name, username, password, appliance_id):
     return diagnostic_bridge.cloud_profile()
 
 
+def download_lua_file(cloud_name, username, password, appliance_id, cache_dir):
+    """Download original .lua for Android user-selected Save As; never execute it."""
+    if not (username and password and appliance_id):
+        raise ValueError("Podaj login, haslo i Device ID do Cloud Lua")
+    diagnostic_bridge.set_cloud(cloud_name, username, password, int(appliance_id))
+    return diagnostic_bridge.download_lua_file(cache_dir)
+
+
 def diagnostic_snapshot():
     return diagnostic_bridge.snapshot()
 
