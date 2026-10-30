@@ -84,7 +84,7 @@ internal object Telemetry {
         "lan_silence_mode" to "Wi-Fi X05: tryb cichy",
         "lan_eco_function" to "Wi-Fi X07: tryb ECO",
         "lan_eco_timer" to "Wi-Fi X07: program ECO",
-        "comp_run_freq" to "Częstotliwość sprężarki (Hz)",
+        "comp_run_freq" to "Częstotliwość sprężarki (Hz; odczyt surowy)",
         "compressor_on" to "Sprężarka pracuje (surowe)",
         "unit_mode_run" to "Tryb pracy jednostki (surowy)",
         "fan_speed" to "Prędkość wentylatora (surowa)",
