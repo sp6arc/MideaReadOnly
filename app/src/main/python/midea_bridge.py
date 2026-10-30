@@ -291,11 +291,44 @@ def export_snapshot():
     with _lock:
         base["history"] = list(_history)
     base["rawLuaCapture"] = diagnostic_bridge.export_capture()
-    base["application"] = "MideaRemonte 2.4.0"
+    base["application"] = "MideaRemonte 2.4.1"
     base["upstream"] = "wuwentao/midea-lan"
     base["upstreamRevision"] = "061df03f27a409bddaa5f5f50e371de5c00098b5"
     return json.dumps(base, ensure_ascii=False)
 
+
+
+def restore_archive(serialized):
+    """Merge saved diagnostic samples from the same device after reconnect.
+
+    Android selects a per-device, app-private archive file. The live C3
+    connection is established first; the archive never changes its state.
+    """
+    archive = json.loads(serialized)
+    prior = archive.get("history", [])
+    if not isinstance(prior,list):
+        return "INVALID_ARCHIVE"
+    with _lock:
+        previous = [item for item in prior if isinstance(item,dict) and
+                    isinstance(item.get("at"),str) and
+                    isinstance(item.get("values"),dict)]
+        combined = previous + list(_history)
+        # One entry per unique payload/timestamp. Keep chronological order.
+        seen = set()
+        merged = []
+        for item in combined:
+            identity = (item["at"],item.get("source",""))
+            if identity not in seen:
+                seen.add(identity)
+                merged.append(item)
+        merged.sort(key=lambda item: item["at"])
+        _history[:] = merged[-_max_history:]
+        for key, timestamp in archive.get("updatesAt",{}).items():
+            if isinstance(timestamp,str):
+                _changed_at.setdefault(key,timestamp)
+    diagnostic_bridge.restore_archive(archive)
+    _event("Przywrócono wcześniejszą historię i dekodowane ramki z pamięci telefonu")
+    return "OK"
 
 def selfcheck():
     from midealan.device import MideaDevice
