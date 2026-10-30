@@ -205,6 +205,11 @@ class MainActivity : Activity() {
         if(h.isBlank()||idText.isBlank()||m.isBlank()){
             state.text="Najpierw wykryj pompę lub wpisz IP, ID i model";return
         }
+        if(m.length < 6 || m == p) {
+            state.text="Nieprawidłowy model: '$m' — $p to port TCP. Użyj Wykryj i wybierz model np. 171H120F."
+            Toast.makeText(this,"Model musi pochodzić z wykrywania pompy, np. 171H120F",Toast.LENGTH_LONG).show()
+            return
+        }
         job("Uruchamiam oryginalny MideaDevice.run()"){
             bindWifi()
             val msg=getPython().getModule("midea_bridge").callAttr(
