@@ -5,6 +5,8 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import java.io.File
+import java.security.MessageDigest
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -51,6 +53,11 @@ class MainActivity : Activity() {
     private lateinit var cloud: Spinner
     private lateinit var found: Spinner
     private var pumpList = JSONArray()
+    private val requestSaveLua = 2301
+    @Volatile private var luaDownloadInProgress = false
+    private var pendingLuaPath: String? = null
+    private var pendingLuaHash: String? = null
+    private var luaSavedName: String? = null
     private var active = true
     private var refreshing = false
     private var wifiNetwork: Network? = null
@@ -183,7 +190,9 @@ class MainActivity : Activity() {
         frames=label(outer,"Oczekiwanie na ramki X01/X05/X07 i 04-04…",13f)
         heading(outer,"Plik protokołu Lua z chmury")
         label(outer,"Można pobrać profil dla 171H120F. To metadane protokołu, nie odczyt temperatur na żywo.",12f)
-        button(outer,"Sprawdź plik Lua na moim koncie"){cloudProfile()}
+        button(outer,"Sprawdź profil Lua (rozmiar i SHA)"){cloudProfile()}
+        button(outer,"Pobierz oryginalny plik Lua i ZAPISZ .lua"){downloadLuaAndSave()}
+        label(outer,"Po zapisaniu pliku wybierz w ChatGPT: + → Pliki → wybierz .lua. Pobieramy oryginalny plik bez zmian; nie uruchamiamy jego kodu.",12f)
         cloudResult=label(outer,"Nie sprawdzono pliku Lua",13f)
 
         heading(outer,"Wszystkie odebrane pola")
@@ -293,6 +302,113 @@ class MainActivity : Activity() {
             onUI{state.text="Cloud Lua: $result"}
         }
     }
+    private fun downloadLuaAndSave(){
+        if(luaDownloadInProgress){
+            state.text="Pobieranie lub zapis Lua już trwa"
+            return
+        }
+        val cn=cloud.selectedItem.toString()
+        val un=account.text.toString().trim()
+        val pw=password.text.toString()
+        val devId=id.text.toString().trim()
+        if(un.isBlank()||pw.isBlank()||devId.isBlank()){
+            state.text="Podaj login chmury, hasło i Device ID"
+            return
+        }
+        luaDownloadInProgress=true
+        job("Pobieram oryginalny Lua z chmury Midea"){
+            try{
+                val response=JSONObject(getPython().getModule("midea_bridge").callAttr(
+                    "download_lua_file",cn,un,pw,devId,cacheDir.absolutePath
+                ).toString())
+                val path=response.getString("path")
+                val meta=response.getJSONObject("metadata")
+                val hash=meta.getString("luaSha256")
+                onUI {
+                    pendingLuaPath=path
+                    pendingLuaHash=hash
+                    try {
+                        val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).apply{
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type="text/plain"
+                            putExtra(Intent.EXTRA_TITLE,"Midea_171H120F_cloud_protocol.lua")
+                        }
+                        startActivityForResult(intent,requestSaveLua)
+                        state.text="Wybierz folder i zatwierdź zapis pliku .lua"
+                    } catch(ex:Exception) {
+                        File(path).delete()
+                        pendingLuaPath=null
+                        pendingLuaHash=null
+                        luaDownloadInProgress=false
+                        state.text="Nie można otworzyć okna zapisu: "+ex.javaClass.simpleName
+                    }
+                }
+            }catch(ex:Exception){
+                luaDownloadInProgress=false
+                // Do not show raw cloud errors: they can contain identifiers.
+                onUI { state.text="Pobranie Lua nieudane ("+ex.javaClass.simpleName+")" }
+            }
+        }
+    }
+
+    @Deprecated("Android document picker result")
+    override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
+        super.onActivityResult(requestCode,resultCode,data)
+        if(requestCode!=requestSaveLua)return
+        val path=pendingLuaPath
+        val expected=pendingLuaHash
+        pendingLuaPath=null
+        pendingLuaHash=null
+        val uri=data?.data
+        if(resultCode!=RESULT_OK || uri==null || path==null || expected==null){
+            if(path!=null)File(path).delete()
+            luaDownloadInProgress=false
+            state.text="Zapis pliku Lua anulowany"
+            return
+        }
+        state.text="Zapisuję pobrany plik Lua…"
+        work.execute {
+            val file=File(path)
+            try {
+                require(file.canonicalFile.parentFile==cacheDir.canonicalFile){
+                    "Nieprawidłowy katalog pliku"
+                }
+                val sha=MessageDigest.getInstance("SHA-256")
+                val output=contentResolver.openOutputStream(uri,"w")
+                    ?:throw IllegalStateException("Brak dostępu do zapisu pliku")
+                var length=0L
+                file.inputStream().use { input ->
+                    output.use { target ->
+                        val buffer=ByteArray(32768)
+                        while(true){
+                            val n=input.read(buffer)
+                            if(n<0)break
+                            target.write(buffer,0,n)
+                            sha.update(buffer,0,n)
+                            length+=n
+                        }
+                        target.flush()
+                    }
+                }
+                val actual=sha.digest().joinToString(""){"%02x".format(it.toInt() and 255)}
+                check(actual.equals(expected,ignoreCase=true)){"Niezgodny SHA-256 pliku Lua"}
+                onUI {
+                    luaSavedName="Midea_171H120F_cloud_protocol.lua"
+                    state.text="Lua zapisany: $length bajtów • SHA-256 zgodny"
+                    Toast.makeText(this,"Plik Lua zapisany. Dołącz go tutaj w ChatGPT.",Toast.LENGTH_LONG).show()
+                }
+            }catch(ex:Exception){
+                onUI {
+                    state.text="Błąd zapisu Lua: "+ex.javaClass.simpleName
+                    Toast.makeText(this,"Nie udało się zapisać pliku Lua",Toast.LENGTH_LONG).show()
+                }
+            }finally {
+                file.delete()
+                luaDownloadInProgress=false
+            }
+        }
+    }
+
     private val tick=object:Runnable{
         override fun run(){
             if(!active)return
@@ -384,7 +500,7 @@ class MainActivity : Activity() {
             "error"->"Błąd: "+cloud.optString("note")
             "checking"->"Pobieranie pliku protokołu…"
             else->"Nie sprawdzono"
-        }
+        } + (luaSavedName?.let{"\nZapisano: "+it+" — dołącz plik do czatu"}?:"")
         val logs=snap.optJSONArray("events")?:JSONArray()
         events.text=(maxOf(0,logs.length()-20) until logs.length()).joinToString("\n"){
             logs.optString(it)
@@ -409,6 +525,7 @@ class MainActivity : Activity() {
     }
     override fun onDestroy(){
         active=false
+        pendingLuaPath?.let{File(it).delete()}
         handler.removeCallbacks(tick)
         if(Python.isStarted()){
             try{getPython().getModule("midea_bridge").callAttr("stop")}catch(_:Exception){}
