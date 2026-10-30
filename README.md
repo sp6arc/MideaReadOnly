@@ -21,8 +21,10 @@ Wersja 2.4.1 naprawia dwa problemy aplikacji 2.4.0.
   w prywatnym katalogu aplikacji co 30 sekund. Poprzedni zapis można
   wyeksportować nawet przy wyłączonym monitoringu. Przy ponownym
   połączeniu wcześniej zapisane próbki są przywracane.
-- **Aktualizacja in-place:** identyfikator aplikacji
-  `pl.zuza.midearemote.lua24` pozostaje bez zmian. Numer wersji: 241.
+- **Instalacja bez konfliktu podpisów:** identyfikator nowej wersji to
+  `pl.zuza.midearemote.lua241`. Dzięki temu pakiet można zainstalować obok
+  2.4.0, nawet jeśli poprzedni APK miał inny podpis debug. Numer wersji: 241.
+  Dane trzeba wpisać raz w nowej aplikacji. Nie uruchamiać dwóch monitorów naraz.
 
 Nie dodajemy żadnych aktywnych testów X09/X10, poleceń SET ani wymagań
 Home Assistant / Modbus. Po wymuszonej interwencji oszczędzania baterii
