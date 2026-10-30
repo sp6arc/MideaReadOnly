@@ -1,4 +1,4 @@
-# MideaRemonte 2.0.1 – ORYGINALNY SILNIK PYTHON
+# MideaRemonte 2.1.0 – 9 OSOBNYCH KART DIAGNOSTYCZNYCH
 
 Dostarczamy oryginalny, NIEMODYFIKOWANY pakiet Python `midealan` z repozytorium
 https://github.com/wuwentao/midea-lan
@@ -18,6 +18,20 @@ Wykorzystywane metody autora:
 - `MideaDevice.connect(check_protocol=True), potem MideaDevice.open` -> `run` -> `connect(check_protocol=True)`
 - `refresh_status(True)`, oryginalna kolejność zapytań, timeouts, heartbeat,
   ponowne połączenie, oryginalne dekodery C3/X10/X00.
+
+W wersji 2.1.0 dodano eksperymentalne osobne karty diagnostyczne:
+- X10: standard 03-10
+- 04-05: pasywny nasłuch 120 s
+- ITS/BTRI: pojedyncze 03-02-01
+- Strony 2F10, 2F12: pojedyncze 03-00-2F10/2F12
+- X08, X0A, X0D: osobne zapytania odczytowe
+- Cloud Lua: sprawdzenie i pobranie profilu Lua (NIE jest live telemetry).
+Testy tylko wysylają MessageType.query 0x03, bez zadnego 0x02 SET.
+Nie uzywaja nowych tokenow, modyfikacji konfiguracji, anonimowych
+skanow ID lub losowego brute force. Oryginalny pakiet Python pozostaje
+niemodyfikowany. Odpowiedzi rozpoznaje adapter Python obserwujacy
+zdekodowane ramki AA przed przekazaniem do oryginalnego dekodera.
+Logi nie zawieraja numerow seryjnych ani pelnych ramek.
 
 W aplikacji pokazujemy wyłącznie atrybuty zarejestrowane przez prawdziwe
 odpowiedzi/notify. Żadnych sztucznie wypełnianych pól.
