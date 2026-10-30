@@ -1,3 +1,40 @@
+# MideaRemonte 2.4.1 — działanie z wygaszonym ekranem i zapamiętywanie konta
+
+Wersja 2.4.1 naprawia dwa problemy aplikacji 2.4.0.
+
+- **Foreground Service (connectedDevice):** połączenie LAN i wątki oryginalnego
+  klienta Python działają w serwisie Android, a nie w ekranie aktywności.
+  Zniszczenie Activity nie zatrzymuje sesji. Usługa utrzymuje odblokowany CPU
+  (PARTIAL_WAKE_LOCK) oraz Wi-Fi (HIGH_PERF WifiLock) i ma widoczne
+  powiadomienie z przyciskiem zatrzymania.
+- **Automatyczne wznowienie:** po restarcie procesu system może wznowić
+  START_STICKY, jeżeli nie zostało użyte ręczne zatrzymanie, a dane konta
+  nadal istnieją. Jeśli telefon utraci Wi-Fi, monitor próbuje ponownie co
+  najmniej 120 sekund. Nie można zagwarantować działania po wymuszonym
+  zatrzymaniu aplikacji lub restarcie telefonu.
+- **Dane konta:** logowanie SmartHome, hasło oraz konfiguracja pompy są
+  szyfrowane AES-256-GCM kluczem AndroidKeyStore. Nie zapisujemy hasła w
+  zwykłych preferencjach ani nie dodajemy go do eksportu. Backup aplikacji
+  jest wyłączony. Jest przycisk usuwania zapisanej konfiguracji.
+- **Automatyczna historia:** raport JSON (w tym próbki, stemple czasu i
+  ograniczony zbiór surowych ramek 04-04/04-05) jest zapisywany atomowo
+  w prywatnym katalogu aplikacji co 30 sekund. Poprzedni zapis można
+  wyeksportować nawet przy wyłączonym monitoringu. Przy ponownym
+  połączeniu wcześniej zapisane próbki są przywracane.
+- **Aktualizacja in-place:** identyfikator aplikacji
+  `pl.zuza.midearemote.lua24` pozostaje bez zmian. Numer wersji: 241.
+
+Nie dodajemy żadnych aktywnych testów X09/X10, poleceń SET ani wymagań
+Home Assistant / Modbus. Po wymuszonej interwencji oszczędzania baterii
+urządzenia Android mogą wyłączyć nawet usługę pierwszoplanową; w takim
+przypadku można zezwolić na nieograniczone działanie aplikacji w ustawieniach
+baterii telefonu. W 2.4.0 nie było zapisu hasła ani historii w pamięci
+trwałej; poprzednich niezapisanych danych nie da się odzyskać.
+
+**APK i pliki:** https://github.com/sp6arc/MideaReadOnly/releases/tag/v2.4.1-midearemonte
+
+---
+
 # MideaRemonte 2.4.0 — pasywna diagnostyka według oryginalnego Lua 171H120F
 
 Nowa gałąź projektu zachowuje całe działające połączenie Wi-Fi (oryginalne
