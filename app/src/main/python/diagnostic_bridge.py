@@ -15,6 +15,7 @@ import threading
 from datetime import datetime, timezone
 
 import aiohttp
+import lua_c3_decoder
 from midealan.cloud import get_midea_cloud
 
 _lock = threading.RLock()
@@ -22,10 +23,15 @@ _frame_stats = {}
 _recent = []
 _cloud_state = {"status": "not_checked"}
 _cloud_credentials = None
+_lua_values = {}
+_lua_times = {}
+_lua_sources = {}
+_lua_packets = []
+_raw_packets = []
 _ALLOWED_REQUESTS = frozenset((
     "MessageQueryBasic", "MessageQuerySilence", "MessageQueryECO"
 ))
-_ALLOWED_FRAMES = frozenset(("03-01", "03-05", "03-07", "04-04"))
+_ALLOWED_FRAMES = frozenset(("03-01", "03-05", "03-07", "03-10", "04-03", "04-04", "04-05"))
 
 
 def _now():
@@ -42,22 +48,51 @@ def attach(dev):
 
     original_process_message = dev.process_message
     def observe(message):
-        result = original_process_message(message)
+        # Passive tap runs BEFORE upstream's parser, which may ignore or reject
+        # 04-05. Never touch the V3 transport, original bytes or polling.
         try:
-            if len(message) >= 12 and message[0] == 0xAA and message[2] == 0xC3:
-                key = f"{message[9]:02X}-{message[10]:02X}"
-                if key in _ALLOWED_FRAMES:
+            if len(message) >= 13 and message[0] == 0xAA and message[2] == 0xC3:
+                family = f"{message[9]:02X}-{message[10]:02X}"
+                if family in _ALLOWED_FRAMES:
                     at = _now()
+                    decoded = lua_c3_decoder.decode_frame(message)
                     with _lock:
-                        entry = _frame_stats.setdefault(key, {"count": 0})
+                        entry = _frame_stats.setdefault(family, {"count": 0})
                         entry["count"] += 1
                         entry["lastSeen"] = at
-                        _recent.append({"at": at, "frame": key})
-                        if len(_recent) > 100:
-                            del _recent[:-100]
+                        entry["lastBytes"] = len(message)
+                        _recent.append({"at": at, "frame": family,
+                                        "bytes": len(message),
+                                        "declaredBytes": int(message[1]) + 1})
+                        del _recent[:-100]
+                        if decoded is not None:
+                            _lua_packets.append({
+                                "at": at, "frame": family,
+                                "decodedCount": decoded["decodedCount"],
+                                "bytes": decoded["length"],
+                                "lengthMatches": decoded["lengthMatches"],
+                            })
+                            del _lua_packets[:-100]
+                            for name, value in decoded["values"].items():
+                                _lua_values[name] = value
+                                _lua_times[name] = at
+                                _lua_sources[name] = family
+                            # These two 04 reports contain no serial-number
+                            # fields in the supplied Lua mapping. Intentionally
+                            # do NOT export raw 03-10 (SN at body 96..191).
+                            if family in ("04-04", "04-05"):
+                                _raw_packets.append({
+                                    "at": at, "frame": family,
+                                    "bytes": len(message),
+                                    "hex": bytes(message).hex(),
+                                    "declaredBytes": int(message[1]) + 1,
+                                })
+                                del _raw_packets[:-30]
         except Exception:
-            pass  # Monitoring never interferes with the original parser.
-        return result
+            # Diagnostics are observational only and must never interrupt
+            # original authentication, decoder, heartbeat or reconnect.
+            pass
+        return original_process_message(message)
     dev.process_message = observe
 
 
@@ -66,6 +101,11 @@ def clear():
     with _lock:
         _frame_stats.clear()
         _recent.clear()
+        _lua_values.clear()
+        _lua_times.clear()
+        _lua_sources.clear()
+        _lua_packets.clear()
+        _raw_packets.clear()
         _cloud_state.clear()
         _cloud_state["status"] = "not_checked"
         _cloud_credentials = None
@@ -183,5 +223,30 @@ def snapshot():
             "frameStats": {k: dict(v) for k, v in _frame_stats.items()},
             "recentFrames": list(_recent[-30:]),
             "cloud": dict(_cloud_state),
+            "luaDecoded": {
+                "values": dict(_lua_values),
+                "updatesAt": dict(_lua_times),
+                "sources": dict(_lua_sources),
+                "sourceLuaSha256": lua_c3_decoder.SOURCE_LUA_SHA256,
+                "measurementUnitsVerified": False,
+                "packets": list(_lua_packets[-20:]),
+            },
+            "rawFramesStored": len(_raw_packets),
             "upstreamPackageModified": False,
         }, ensure_ascii=False)
+
+
+def export_capture():
+    """Bounded full hex frames ONLY for passive 04-04 and 04-05.
+
+    No 03-10 full frames: original unit responses contain SN fields.
+    Captures may still reveal technical details of the installation; users
+    should review a report before publishing it publicly.
+    """
+    with _lock:
+        return {
+            "rawFrames": list(_raw_packets),
+            "luaDecodedPackets": list(_lua_packets),
+            "capturePolicy": "04-04/04-05 only; 03-10 raw excluded",
+            "frameBytesPosition": "AA header, byte 9 type, byte 10 subtype",
+        }
