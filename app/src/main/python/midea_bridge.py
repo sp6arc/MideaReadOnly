@@ -12,6 +12,7 @@ from enum import Enum
 from datetime import datetime, timezone
 
 import aiohttp
+import diagnostic_bridge
 
 from midealan.cloud import get_default_cloud, get_midea_cloud, SUPPORTED_CLOUDS
 from midealan.const import ProtocolVersion
@@ -130,6 +131,7 @@ def stop():
     with _lock:
         old = _device
         _device = None
+    diagnostic_bridge.clear()
     if old is not None:
         _event("Zatrzymuję oryginalny wątek MideaDevice")
         old.close()
@@ -186,6 +188,8 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         if dev is None:
             raise RuntimeError("Oryginalny device_selector nie obsługuje C3")
         dev.register_update(_on_update)
+        # Passive observation only: original decoder runs unchanged.
+        diagnostic_bridge.attach(dev)
         _event(f"Próba autoryzacji LAN {index}/{len(candidates)} — oryginalny connect(check_protocol=True)")
         # This is the exact method used by the upstream MideaDevice._connect_loop.
         # It performs refresh_status(True) AND set_available(connected).
@@ -200,6 +204,7 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
                 dev.close_socket()
                 return "CANCELLED"
             _device = dev
+        diagnostic_bridge.set_cloud(cloud_name, username, password, appliance_id)
         _event("Oryginalny MideaDevice.open(): heartbeat/refresh/reconnect autora")
         dev.open()
         return "OK"
@@ -237,6 +242,15 @@ def snapshot():
         "error":error
     }
     return json.dumps(status, ensure_ascii=False)
+
+
+def diagnostic_probe(name):
+    """One read-only documented command, or passive listening/cloud Lua."""
+    return diagnostic_bridge.probe(name)
+
+
+def diagnostic_snapshot():
+    return diagnostic_bridge.snapshot()
 
 
 def selfcheck():
