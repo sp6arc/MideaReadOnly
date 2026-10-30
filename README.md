@@ -1,57 +1,60 @@
-# MideaRemonte 2.1.0 – 9 OSOBNYCH KART DIAGNOSTYCZNYCH
+# MideaRemonte 2.2.0 — tylko działające protokoły
 
-Dostarczamy oryginalny, NIEMODYFIKOWANY pakiet Python `midealan` z repozytorium
-https://github.com/wuwentao/midea-lan
+Projekt Android do monitorowania Midea M-Thermal R32, urządzenie typu C3,
+moduł Wi-Fi 171H120F. Zbudowany z oryginalnej, niemodyfikowanej biblioteki
+[wuwentao/midea-lan](https://github.com/wuwentao/midea-lan),
+commit `061df03f27a409bddaa5f5f50e371de5c00098b5`.
 
-Punkt kontrolny upstream:
-`061df03f27a409bddaa5f5f50e371de5c00098b5` (2026-10-30)
+## Co odczytujemy
 
-CI pobiera ten konkretny commit, kopiuje `midealan/` bez zmian i pakuje przez
-Chaquopy 17.2.0/Python 3.12. `app/src/main/python/midea_bridge.py` wyłącznie
-wywołuje oryginalne publiczne metody pakietu i konwertuje wyniki do JSON;
-`MainActivity.kt` tylko pokazuje wartości.
+- X01 (03-01): cyklicznie ustawienia stref, CWU, stan włączenia, tryby i błędy
+- X05 (03-05): cyklicznie tryb cichy
+- X07 (03-07): cyklicznie ECO
+- 04-04 (spontaniczny raport): stan ogrzewania, temperatura zewnętrzna,
+  sumaryczne liczniki energii — **nie musi przychodzić cyklicznie**.
+- Cloud Lua: pobranie od Midea pliku protokołu dla przypisanego C3,
+  tylko metadane długość/SHA256/model, bez pobierania temperatur w chmurze.
 
-Wykorzystywane metody autora:
-- `midealan.discover.discover` – UDP bez własnych ramek
-- `midealan.cloud.get_midea_cloud`, `login`, `get_cloud_keys`
-- `midealan.devices.device_selector`
-- `MideaDevice.connect(check_protocol=True), potem MideaDevice.open` -> `run` -> `connect(check_protocol=True)`
-- `refresh_status(True)`, oryginalna kolejność zapytań, timeouts, heartbeat,
-  ponowne połączenie, oryginalne dekodery C3/X10/X00.
+## Wyłączone
 
-W wersji 2.1.0 dodano eksperymentalne osobne karty diagnostyczne:
-- X10: standard 03-10
-- 04-05: pasywny nasłuch 360 s
-- ITS/BTRI: pojedyncze 03-02-01
-- Strony 2F10, 2F12: pojedyncze 03-00-2F10/2F12
-- X08, X0A, X0D: osobne zapytania odczytowe
-- Cloud Lua: sprawdzenie i pobranie profilu Lua z konta, niezaleznie od LAN (NIE jest live telemetry).
-Testy tylko wysylają MessageType.query 0x03, bez zadnego 0x02 SET.
-Nie uzywaja nowych tokenow, modyfikacji konfiguracji, anonimowych
-skanow ID lub losowego brute force. Oryginalny pakiet Python pozostaje
-niemodyfikowany. Odpowiedzi rozpoznaje adapter Python obserwujacy
-zdekodowane ramki AA przed przekazaniem do oryginalnego dekodera.
-Logi nie zawieraja numerow seryjnych ani pelnych ramek.
+Znane nieodpowiadające X09 (dezynfekcja) i X10 (UnitPara) **nie są wysyłane**
+ani przy wstępnej autoryzacji, ani w odświeżaniu cyklicznym. Filtr
+`diagnostic_bridge.attach()` ogranicza `device.build_query()` do klas
+`MessageQueryBasic`, `MessageQuerySilence` i `MessageQueryECO`.
+Oryginalny `midealan/` pozostaje bez zmian (szyfrowanie, autoryzacja
+V3, dekodowanie, reconnect, heartbeat). Zapytanie identyfikacji urządzenia
+podczas handshaku pozostaje aktywne.
 
-W aplikacji pokazujemy wyłącznie atrybuty zarejestrowane przez prawdziwe
-odpowiedzi/notify. Żadnych sztucznie wypełnianych pól.
+Z aplikacji usunięto: 03-02-01 (ITS), strony 2F10/2F12, X08/X0A/X0D,
+ręczny X10 i 6-minutowy nasłuch diagnostyczny 04-05.
+Nie ma funkcji SET ani zmian konfiguracji urządzenia.
 
-## Budowanie
-`./scripts/fetch-upstream.sh`, potem `./gradlew :app:testDebugUnitTest :app:assembleDebug`
-przy zainstalowanym Android SDK 35, Python 3.12 i JDK 17.
-GitHub Actions wykonuje wszystko automatycznie.
+## Gromadzenie danych
 
-## Ograniczenia
-APK nie jest dowodem na kompatybilność firmware 171H120F z X10.
-Zgłoszenie autora: https://github.com/wuwentao/midea_ac_lan/issues/1137
-Wystąpienie tego samego błędu na niezmienionym silniku Python jest istotnym
-wynikiem diagnostycznym, a nie dowodem na brak telemetrii w LetsLink.
+W widoku głównym kafelki z ostatnimi odczytami i wiekiem ramki.
+Dane z 04-04 są oznaczone jako potencjalnie nieaktualne. Na ekranie
+widać liczniki i ostatni czas ramek 03-01/03-05/03-07/04-04.
 
-Implementacja Android zachowuje WYŁĄCZNIE funkcje odczytowe w UI.
-Pakiet autora zawiera również metody zapisu/sterowania, ale nie są one
-wywoływane. Upstream nie jest biblioteką serwisową LetsLink.
+Eksport JSON zawiera:
+- ostatnie potwierdzone wartości i osobne znaczniki `updatesAt`;
+- do 800 ostatnich próbek dekodowanych odpowiedzi, z czasem i typem ramki;
+- statystyki ramek i metadane profilu Lua, jeśli odczytany;
+- brak haseł, tokenów, numerów seryjnych i pełnych ramek.
 
-## Instalacja testowa
-Ta kompilacja uzywa osobnego applicationId `pl.zuza.midearemote.diagnostics`:
-mozna ja zainstalowac obok MideaRemonte 2.0.1, bez odinstalowania poprzedniej.
-Nie uruchamiaj jednoczesnie aktywnego odczytu w obu aplikacjach.
+Liczniki energii są przedstawiane **bez jednostki**, dopóki nie
+potwierdzimy skali i poprawności. `status_heating` to ostatni raport
+04-04, a nie dowód bieżącej pracy sprężarki.
+
+## Instalacja i budowa
+
+Testowe APK ma `applicationId=pl.zuza.midearemote.diagnostics`
+i aktualizuje MideaRemonte TESTY 2.1.0; może współistnieć
+z MideaRemonte 2.0.1. Nie uruchamiaj obu monitorów naraz.
+
+```sh
+bash scripts/fetch-upstream.sh
+./gradlew :app:testDebugUnitTest :app:assembleDebug
+```
+
+W GitHub Actions wymagane są JDK 17, Python 3.12, Android SDK 35,
+Gradle i Chaquopy.
