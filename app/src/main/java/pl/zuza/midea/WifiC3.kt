@@ -488,7 +488,7 @@ internal object WifiC3 {
                     currentReadings.putAll(partial.readings)
                     val display=LanResult(currentReadings,
                         if(partial.rawX10.isBlank())raw else partial.rawX10,
-                        part.responseType,steps+partial.steps,frames+partial.frames,
+                        partial.responseType,steps+partial.steps,frames+partial.frames,
                         fieldSources+partial.fieldSources,fieldTimes+partial.fieldTimes)
                     progress(display,((deadline-android.os.SystemClock.elapsedRealtime())/1000).coerceAtLeast(0).toInt())
                 }
