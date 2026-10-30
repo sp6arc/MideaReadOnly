@@ -2,329 +2,282 @@ package pl.zuza.midea
 
 import android.app.Activity
 import android.content.Intent
-import android.graphics.Color
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
-import android.view.View
 import android.view.WindowManager
 import android.widget.*
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * MideaRemonte: plain-text, read-only diagnostic frontend for a Midea C3 heat pump.
- * No controls, HA, Modbus or extra hardware. Raw frames have identifying tails stripped.
+ * Android shell ONLY. Every network packet and every C3 decode comes from
+ * unmodified wuwentao/midea-lan Python, pinned in the GitHub Actions build.
  */
 class MainActivity : Activity() {
-    private val worker = Executors.newSingleThreadExecutor()
-    private val cloud = CloudClient()
-    private val cancel = AtomicBoolean(false)
-    private val events = mutableListOf<String>()
-    private var loggedIn = false
-    private var cloudPumps = listOf<Pump>()
-    private var localPumps = listOf<LanPump>()
-    private var chosenCloud: Pump? = null
-    private var chosenLan: LanPump? = null
-    private var lastLan: LanResult? = null
-    private var lastCloud: JSONObject? = null
-    private var lastLua: JSONObject? = null
-    private var lastRelay: DiagnosticResult? = null
-    private lateinit var store: SecretsStore
-
-    private lateinit var account: EditText
-    private lateinit var password: EditText
-    private lateinit var remember: CheckBox
+    private val work = Executors.newSingleThreadExecutor()
+    private val statusWork = Executors.newSingleThreadExecutor()
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var events: TextView
+    private lateinit var values: TextView
+    private lateinit var state: TextView
+    private lateinit var version: TextView
     private lateinit var host: EditText
     private lateinit var port: EditText
-    private lateinit var deviceId: EditText
-    private lateinit var protocol: EditText
+    private lateinit var id: EditText
     private lateinit var model: EditText
-    private lateinit var cloudPicker: Spinner
-    private lateinit var lanPicker: Spinner
-    private lateinit var identity: TextView
-    private lateinit var readings: TextView
-    private lateinit var cloudReadings: TextView
-    private lateinit var frames: TextView
-    private lateinit var logView: TextView
-    private lateinit var state: TextView
+    private lateinit var proto: EditText
+    private lateinit var account: EditText
+    private lateinit var password: EditText
+    private lateinit var cloud: Spinner
+    private lateinit var found: Spinner
+    private var pumpList = JSONArray()
+    private var lastSnapshot = JSONObject()
+    private var active = true
+    private var refreshing = false
+    private var wifiNetwork: Network? = null
+    private var wifiLock: WifiManager.MulticastLock? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        window.statusBarColor = Color.rgb(245, 245, 245)
-        window.navigationBarColor = Color.rgb(245, 245, 245)
-        store = SecretsStore(this)
-        val saved = runCatching { store.load() }.getOrNull()
-
-        val scroll = ScrollView(this)
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(px(16), px(18), px(16), px(28))
-            setBackgroundColor(Color.WHITE)
+        val scroll=ScrollView(this)
+        val outer=LinearLayout(this).apply {
+            orientation=LinearLayout.VERTICAL
+            setPadding(px(16),px(18),px(16),px(28))
+            setBackgroundColor(android.graphics.Color.WHITE)
         }
-        scroll.addView(content)
+        scroll.addView(outer)
         setContentView(scroll)
+        heading(outer,"MideaRemonte — silnik autora")
+        version=line(outer,"Inicjalizowanie oryginalnej biblioteki Python…",12)
+        state=line(outer,"Stan: uruchamianie",14)
 
-        title(content, "MideaRemonte")
-        label(content, "Diagnostyka pompy C3 — tylko odczyt. Wykrywanie UDP → Token/Key → TCP/V3 → A0 → X01/X09/X05/X07/X10 → powiadomienia.", 13)
-        state = label(content, "Stan: niepołączono", 14)
-
-        title(content, "1. Identyfikacja pompy w Wi-Fi")
-        button(content, "Wykryj pompy w sieci Wi-Fi") { discover() }
-        lanPicker = Spinner(this).also { content.addView(it) }
-        lanPicker.onItemSelectedListener = selection { index ->
-            chosenLan = localPumps.getOrNull(index)
-            chosenLan?.let { lan ->
-                host.setText(lan.host); port.setText(lan.port.toString())
-                deviceId.setText(lan.id.toString()); protocol.setText(lan.protocol.toString())
-                if (lan.model.isNotBlank()) model.setText(lan.model)
-                showIdentity()
+        heading(outer,"1. Wykrywanie — oryginalne discover()")
+        host=field(outer,"IP pompy (puste = skan sieci)", "")
+        button(outer,"Wykryj przez lokalne Wi-Fi") { discover() }
+        found=Spinner(this)
+        outer.addView(found)
+        found.onItemSelectedListener=object:android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(p:android.widget.AdapterView<*>?){}
+            override fun onItemSelected(p:android.widget.AdapterView<*>?,v:android.view.View?,pos:Int,rowId:Long){
+                val d=pumpList.optJSONObject(pos)?:return
+                host.setText(d.optString("host"))
+                port.setText(d.optString("port"))
+                id.setText(d.optString("id"))
+                model.setText(d.optString("model"))
+                proto.setText(d.optString("protocol"))
             }
         }
-        host = edit(content, "Adres IP pompy (ręczne połączenie)", "")
-        port = edit(content, "Port TCP", "6444", InputType.TYPE_CLASS_NUMBER)
-        deviceId = edit(content, "Device ID (liczba)", "", InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
-        protocol = edit(content, "Wersja LAN (2 lub 3)", "3", InputType.TYPE_CLASS_NUMBER)
-        model = edit(content, "Profil/model (np. 171H120F lub 17100007)", "")
-        identity = label(content, "Wykryte urządzenie: brak", 12)
 
-        title(content, "2. Konto chmurowe SmartHome (klucze V3)")
-        account = edit(content, "Login SmartHome", saved?.account.orEmpty())
-        password = edit(content, "Hasło SmartHome", saved?.password.orEmpty(),
+        heading(outer,"2. Identyfikacja lokalna")
+        port=field(outer,"Port TCP", "6444",InputType.TYPE_CLASS_NUMBER)
+        id=field(outer,"Device ID", "",InputType.TYPE_CLASS_NUMBER)
+        model=field(outer,"Model/SN8 z discover, np. 171H120F", "")
+        proto=field(outer,"Wersja transportu (2/3)", "3",InputType.TYPE_CLASS_NUMBER)
+
+        heading(outer,"3. Chmura — wyłącznie logowanie i klucze LAN")
+        cloud=Spinner(this)
+        outer.addView(cloud)
+        cloud.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,
+            arrayOf("SmartHome","美的美居","Midea Air","NetHome Plus","Ariston Clima","TSmartLife","Toshiba Iolife"))
+        account=field(outer,"Login chmury", "")
+        password=field(outer,"Hasło chmury", "",
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
-        remember = CheckBox(this).apply {
-            text = "Zapamiętaj login i hasło w Android Keystore"
-            isChecked = saved != null
-        }
-        content.addView(remember)
-        button(content, "Zaloguj i pobierz listę pomp") { login() }
-        cloudPicker = Spinner(this).also { content.addView(it) }
-        cloudPicker.onItemSelectedListener = selection { index ->
-            chosenCloud = cloudPumps.getOrNull(index)
-            chosenCloud?.let {
-                if (deviceId.text.isBlank()) deviceId.setText(it.id.toString())
-                if (model.text.isBlank() && it.sn8.isNotBlank()) model.setText(it.sn8)
-                showIdentity()
+        line(outer,"Hasło przechowywane tylko w pamięci podczas działania aplikacji.",12)
+
+        heading(outer,"4. Odczyt — oryginalny MideaDevice.open()")
+        button(outer,"URUCHOM silnik autora (LAN)") { startMonitor() }
+        button(outer,"Zatrzymaj odczyt") { stopMonitor() }
+        button(outer,"Eksportuj raport bez haseł i tokenów") { export() }
+        heading(outer,"Oryginalne parametry z pompy")
+        values=line(outer,"Brak odczytów",13)
+        heading(outer,"Dziennik biblioteki")
+        events=line(outer,"Brak operacji",12)
+
+        job("Weryfikacja pakietu Python") {
+            val py=getPython()
+            val b=py.getModule("midea_bridge")
+            val obj=JSONObject(b.callAttr("selfcheck").toString())
+            onUI {
+                version.text="Autor: wuwentao/midea-lan · " +
+                    obj.optString("version") + " · Python 3.12 · oryginalny X10: " +
+                    obj.optString("x10")
+                state.text="Silnik źródłowy załadowany"
             }
         }
-
-        title(content, "3. Diagnostyka lokalna LAN")
-        label(content, "Sesja nasłuchuje również powiadomień push X04, X05 i X00/2010/20B0/2F10; nie wysyła komend sterujących.", 12)
-        button(content, "Uruchom odczyt LAN – 45 s") { readLan(45) }
-        button(content, "Dłuższy nasłuch LAN – 90 s") { readLan(90) }
-        button(content, "Zatrzymaj nasłuch") { cancel.set(true); log("Żądanie zatrzymania nasłuchu") }
-        readings = label(content, "Brak danych LAN", 13)
-
-        title(content, "4. Odczyt chmury SmartHome")
-        button(content, "Odczytaj status z chmury") { readCloud() }
-        button(content, "Sprawdź UNITPARA (query_type=16)") { readLua() }
-        button(content, "Sprawdź transparentny odczyt X10") { readRelay() }
-        cloudReadings = label(content, "Brak danych chmurowych", 13)
-
-        title(content, "5. Odebrane ramki i dziennik")
-        button(content, "Udostępnij raport JSON") { exportReport() }
-        frames = label(content, "Brak ramek", 11)
-        logView = label(content, "Nie wykonano jeszcze operacji", 11)
-        log("MideaRemonte 1.0: oczekiwanie na działanie użytkownika")
+        handler.postDelayed(tick,1800)
     }
 
-    private fun px(n: Int) = (n * resources.displayMetrics.density + 0.5f).toInt()
-    private fun title(parent: LinearLayout, text: String) {
-        val item = label(parent, text, 17)
-        item.setTextColor(Color.BLACK)
-        item.setPadding(0, px(23), 0, px(8))
-        item.setTypeface(null, android.graphics.Typeface.BOLD)
+    private fun getPython():Python {
+        if(!Python.isStarted()) Python.start(AndroidPlatform(applicationContext))
+        return Python.getInstance()
     }
-    private fun label(parent: LinearLayout, text: String, size: Int): TextView =
-        TextView(this).apply {
-            this.text = text
-            textSize = size.toFloat()
-            setTextColor(Color.rgb(36, 45, 52))
-            setTextIsSelectable(true)
-            setPadding(0, px(5), 0, px(6))
-            parent.addView(this)
-        }
-    private fun edit(parent: LinearLayout, hintValue: String, initial: String, type: Int = InputType.TYPE_CLASS_TEXT): EditText =
-        EditText(this).apply {
-            hint = hintValue
-            setText(initial)
-            inputType = type
-            textSize = 14f
-            setSingleLine(true)
-            parent.addView(this, LinearLayout.LayoutParams(-1, px(53)))
-        }
-    private fun button(parent: LinearLayout, textValue: String, action: () -> Unit) {
-        Button(this).apply {
-            text = textValue
-            isAllCaps = false
-            setOnClickListener { action() }
-            parent.addView(this, LinearLayout.LayoutParams(-1, px(47)))
-        }
+    private fun px(x:Int)=(resources.displayMetrics.density*x+.5f).toInt()
+    private fun heading(root:LinearLayout,t:String){
+        val v=line(root,t,17)
+        v.setTypeface(null,android.graphics.Typeface.BOLD)
+        v.setPadding(0,px(22),0,px(10))
     }
-    private fun selection(callback: (Int) -> Unit) = object : android.widget.AdapterView.OnItemSelectedListener {
-        override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
-        override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) { callback(position) }
+    private fun line(root:LinearLayout,t:String,size:Int)=TextView(this).apply{
+        text=t;textSize=size.toFloat();setTextColor(android.graphics.Color.rgb(22,32,41))
+        setTextIsSelectable(true)
+        setPadding(0,px(4),0,px(4))
+        root.addView(this)
     }
-    private fun setSpinner(spinner: Spinner, items: List<String>) {
-        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+    private fun field(root:LinearLayout, hintValue:String,default:String,
+        inputMode:Int=InputType.TYPE_CLASS_TEXT)=EditText(this).apply{
+        hint=hintValue
+        setText(default)
+        inputType=inputMode
+        textSize=14f
+        setSingleLine(true)
+        root.addView(this,LinearLayout.LayoutParams(-1,px(52)))
     }
-    private fun showIdentity() {
-        identity.text = "LAN: " + (chosenLan?.display ?: "ręcznie") +
-            " | ID: " + deviceId.text + " | model: " + model.text +
-            " | chmura: " + (chosenCloud?.name ?: "nie wybrano")
+    private fun button(root:LinearLayout,t:String,action:()->Unit)=Button(this).apply{
+        text=t;isAllCaps=false;setOnClickListener{action()}
+        root.addView(this,LinearLayout.LayoutParams(-1,px(49)))
     }
-    private fun log(message: String) {
-        runOnUiThread {
-            events.add(java.time.LocalTime.now().withNano(0).toString() + " " + message)
-            while (events.size > 220) events.removeAt(0)
-            logView.text = events.joinToString("\n")
-            state.text = "Stan: " + message
-        }
-    }
-    private fun task(name: String, block: () -> Unit) {
-        log("START: " + name)
-        worker.execute {
-            try { block(); log("OK: " + name) }
-            catch (t: Throwable) { log("BŁĄD " + name + ": " + (t.message ?: t.javaClass.simpleName)) }
-        }
-    }
-    private fun discover() {
-        task("Odkrywanie UDP 6445/20086, odbiór 7083/15000") {
-            val list = WifiC3.discover(this)
-            runOnUiThread {
-                localPumps = list
-                setSpinner(lanPicker, list.map { it.display + " · " + it.model })
-                if (list.isEmpty()) identity.text = "Nie znaleziono C3; można wprowadzić IP/ID ręcznie."
+    private fun onUI(doIt:()->Unit){runOnUiThread { if(active) doIt() }}
+    private fun job(task:String,doIt:()->Unit){
+        state.text=task
+        work.execute{
+            try{doIt()}catch(ex:Exception){
+                val description=ex.message?.take(250)?:ex.javaClass.simpleName
+                onUI{state.text="Błąd: $description";Toast.makeText(this,description,Toast.LENGTH_LONG).show()}
             }
-            log("Znaleziono urządzeń C3: " + list.size)
         }
     }
-    private fun login() {
-        val u = account.text.toString().trim()
-        val p = password.text.toString()
-        val storePassword = remember.isChecked
-        if (u.isBlank() || p.isBlank()) { log("Podaj login i hasło"); return }
-        task("Logowanie do SmartHome") {
-            cloud.login(u, p)
-            val pumps = cloud.pumps()
-            loggedIn = true
-            if (storePassword) store.save(SavedLogin(u, p, null)) else store.forget()
-            runOnUiThread {
-                cloudPumps = pumps
-                setSpinner(cloudPicker, pumps.map { it.name + " | ID " + it.id + " | SN8 " + it.sn8 })
+    private fun bindWifi(){
+        val connectivity=getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        wifiNetwork=connectivity.allNetworks.firstOrNull { n ->
+            connectivity.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true
+        }
+        requireNotNull(wifiNetwork){"Telefon musi być połączony z Wi-Fi pompy"}
+        // Native Python sockets use the same selected Wi-Fi as the Android shell.
+        @Suppress("DEPRECATION")
+        connectivity.bindProcessToNetwork(wifiNetwork)
+    }
+    private fun discover(){
+        val address=host.text.toString().trim()
+        job("Oryginalne discover() — 5 sekund"){
+            bindWifi()
+            val wifi=getSystemService(WIFI_SERVICE) as WifiManager
+            val lock=wifi.createMulticastLock("midearemote-upstream").apply{setReferenceCounted(false)}
+            wifiLock=lock
+            lock.acquire()
+            try{
+                val json=getPython().getModule("midea_bridge").callAttr("scan",address).toString()
+                val list=JSONArray(json)
+                onUI{
+                    pumpList=list
+                    val names=(0 until list.length()).map{
+                        val d=list.getJSONObject(it)
+                        d.optString("host") + ":" + d.optString("port") +
+                            " · " + d.optString("model") + " · V" + d.optString("protocol")
+                    }
+                    found.adapter=ArrayAdapter(this,android.R.layout.simple_spinner_dropdown_item,names)
+                    state.text="Oryginalne discover() znalazło: "+list.length()
+                }
+            }finally{
+                if(lock.isHeld)lock.release()
+                wifiLock=null
             }
-            log("Zalogowano; znaleziono pomp C3: " + pumps.size)
         }
     }
-    private fun configuredLan(): LanPump {
-        val ip = WifiC3.checkedIp(host.text.toString().trim())
-        val id = deviceId.text.toString().trim().toLong()
-        val pr = protocol.text.toString().trim().toInt()
-        require(id > 0 && pr in 2..3) { "Sprawdź deviceId i wersję LAN" }
-        return LanPump(ip, port.text.toString().trim().toInt(), id, 0xc3, pr, model.text.toString().trim())
+    private fun startMonitor(){
+        val h=host.text.toString().trim()
+        val p=port.text.toString().trim()
+        val idText=id.text.toString().trim()
+        val m=model.text.toString().trim()
+        val pr=proto.text.toString().trim()
+        val cn=cloud.selectedItem.toString()
+        val user=account.text.toString().trim()
+        val pass=password.text.toString()
+        if(h.isBlank()||idText.isBlank()||m.isBlank()){
+            state.text="Najpierw wykryj pompę lub wpisz IP, ID i model";return
+        }
+        job("Uruchamiam oryginalny MideaDevice.run()"){
+            bindWifi()
+            val msg=getPython().getModule("midea_bridge").callAttr(
+                "start_monitor",h,p,idText,m,pr,cn,user,pass).toString()
+            onUI{state.text="Silnik autora: $msg"}
+        }
     }
-    private fun readLan(seconds: Int) {
-        val chosen = runCatching { configuredLan() }.getOrElse { log(it.message ?: "Nieprawidłowe parametry LAN"); return }
-        val profile = model.text.toString().trim().ifBlank { chosenCloud?.sn8.orEmpty() }
-        cancel.set(false)
-        task("LAN " + seconds + " s; model " + profile) {
-            val keys = if (chosen.protocol == 3) {
-                check(loggedIn) { "Dla V3 zaloguj się do SmartHome w kroku 2" }
-                log("Pobieram token/key z chmury dla ID " + chosen.id)
-                cloud.lanKeys(chosen.id)
-            } else null
-            log("Łączenie TCP i handshake V" + chosen.protocol)
-            val result = WifiC3.poll(this, chosen, profile, keys, seconds, { cancel.get() }) { partial, left ->
-                runOnUiThread {
-                    lastLan = partial
-                    displayLan(partial, left)
+    private fun stopMonitor(){
+        job("Zamykanie oryginalnego wątku"){
+            getPython().getModule("midea_bridge").callAttr("stop")
+            onUI{state.text="Odczyt zatrzymany"}
+        }
+    }
+    private val tick=object:Runnable {
+        override fun run(){
+            if(!active)return
+            if(!refreshing){
+                refreshing=true
+                statusWork.execute{
+                    try{
+                        if(!Python.isStarted())return@execute
+                        val json=getPython().getModule("midea_bridge").callAttr("snapshot").toString()
+                        val snap=JSONObject(json)
+                        lastSnapshot=snap
+                        onUI{render(snap)}
+                    }catch(_:Exception){}finally{refreshing=false}
                 }
             }
-            runOnUiThread { lastLan = result; displayLan(result, 0) }
-            log("Odebrano " + result.frames.count { it.direction == "RX" } +
-                " ramek; rozpoznano " + result.readings.size + " parametrów")
+            handler.postDelayed(this,2500)
         }
     }
-    private fun displayLan(result: LanResult, secondsLeft: Int) {
-        val values = result.readings.toSortedMap().entries.joinToString("\n") { (key, value) ->
-            key + " = " + value + "   [" + (result.fieldSources[key] ?: "unknown") + "]"
+    private fun render(snap:JSONObject){
+        val data=snap.optJSONObject("values")?:JSONObject()
+        val keys=data.keys().asSequence().toList().sorted()
+        val items=keys.joinToString("\n"){k ->
+            k+" = "+when(val value=data.opt(k)){
+                is JSONArray, is JSONObject -> value.toString()
+                else -> value?.toString()?:"null"
+            }
         }
-        readings.text = "Parametry LAN: " + result.readings.size +
-            " | ramki: " + result.frames.size + " | pozostało: " + secondsLeft + " s\n" +
-            (values.ifBlank { "Brak rozpoznanych danych, przejrzyj odebrane ramki." })
-        frames.text = result.frames.takeLast(100).joinToString("\n") { frame ->
-            frame.receivedAt + " " + frame.direction + " " + frame.request +
-                " type=" + frame.messageType + " bytes=" + frame.size +
-                " checksum=" + frame.checksumOk + " HEX=" + frame.rawPrefixHex +
-                (if (frame.truncated) " [ucięto dane identyfikacyjne]" else "")
-        } + "\n\nPRZEBIEG:\n" + result.steps.takeLast(150).joinToString("\n")
+        values.text="Parametry z oryginalnego dekodera: "+snap.optInt("presentCount")+
+            " / "+snap.optInt("allCount")+"\n\n"+
+            items.ifEmpty{"Brak nowych danych; silnik autora może nadal próbować połączyć pompę."}
+        val recent=snap.optJSONArray("events")?:JSONArray()
+        events.text=(0 until recent.length()).joinToString("\n"){recent.optString(it)}
+        state.text=if(snap.optBoolean("running"))
+            "Silnik uruchomiony · "+(if(snap.optBoolean("available"))"pompa online" else "inicjalizacja/ponowne łączenie")+
+                " · protokół wiadomości "+snap.optInt("messageProtocol")
+        else state.text.toString()
     }
-    private fun selectedPump(): Pump = chosenCloud ?: error("Wybierz pompę z konta SmartHome")
-    private fun displayCloud(data: JSONObject, label: String) {
-        val snapshot = Telemetry.capture(data)
-        val txt = snapshot.fields.sortedBy { it.path }.joinToString("\n") {
-            it.path + " = " + it.shownValue
-        }
-        runOnUiThread {
-            cloudReadings.text = label + " | pól: " + snapshot.fields.size + "\n" + txt
-        }
+    private fun export(){
+        val obj=JSONObject(lastSnapshot.toString())
+        obj.put("application","MideaRemonte")
+        obj.put("upstream","wuwentao/midea-lan")
+        obj.put("upstreamRevision","061df03f27a409bddaa5f5f50e371de5c00098b5")
+        val text=obj.toString(2)
+        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply{
+            type="application/json"
+            putExtra(Intent.EXTRA_TEXT,text)
+        },"Udostępnij odczyt oryginalnego silnika"))
     }
-    private fun readCloud() = task("Status chmury") {
-        val result = cloud.status(selectedPump())
-        lastCloud = Telemetry.safeValues(result)
-        displayCloud(result, "Chmura – status")
-    }
-    private fun readLua() = task("Chmura UNITPARA / query_type=16") {
-        val result = cloud.unitDiagnosticsLua(selectedPump())
-        lastLua = Telemetry.safeValues(result)
-        displayCloud(result, "Chmura – UNITPARA")
-    }
-    private fun readRelay() = task("Chmura transparentne X10") {
-        val result = cloud.diagnostic(selectedPump())
-        lastRelay = result
-        runOnUiThread {
-            cloudReadings.text = "X10 chmura | dekoder poprawnego profilu: " + result.profileDecoded +
-                "\n" + result.readings.toSortedMap().entries.joinToString("\n") { it.key + " = " + it.value } +
-                "\nSurowy hex odpowiedzi: " + result.rawFrameHex.take(176)
+    override fun onDestroy(){
+        active=false
+        handler.removeCallbacks(tick)
+        if(Python.isStarted()){
+            try { getPython().getModule("midea_bridge").callAttr("stop") } catch(_:Exception){}
         }
-    }
-    private fun exportReport() {
-        val data = JSONObject()
-        data.put("app", "MideaRemonte")
-        data.put("timestamp", java.time.Instant.now().toString())
-        data.put("model", model.text.toString())
-        val lan = lastLan
-        if (lan != null) {
-            data.put("lanValues", JSONObject(lan.readings))
-            data.put("lanSources", JSONObject(lan.fieldSources))
-            data.put("lanSteps", JSONArray(lan.steps))
-            data.put("lanFrames", JSONArray().apply {
-                lan.frames.forEach {
-                    put(JSONObject().put("direction", it.direction).put("request", it.request)
-                        .put("messageType", it.messageType).put("length", it.size)
-                        .put("valid", it.checksumOk).put("hexPrefix", it.rawPrefixHex)
-                        .put("truncated", it.truncated))
-                }
-            })
-        }
-        lastCloud?.let { data.put("cloudStatus", it) }
-        lastLua?.let { data.put("cloudUnitpara", it) }
-        lastRelay?.let {
-            data.put("cloudRelayDecoded", JSONObject(it.readings))
-            data.put("cloudRelayRawPrefix", it.rawFrameHex.take(176))
-        }
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/json"
-            putExtra(Intent.EXTRA_TEXT, data.toString(2))
-        }
-        startActivity(Intent.createChooser(intent, "Udostępnij raport"))
-    }
-    override fun onDestroy() {
-        cancel.set(true)
-        worker.shutdownNow()
-        cloud.clear()
+        work.shutdownNow()
+        statusWork.shutdownNow()
+        wifiLock?.let{ if(it.isHeld)it.release() }
+        val connectivity=getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        @Suppress("DEPRECATION")
+        connectivity.bindProcessToNetwork(null)
         super.onDestroy()
     }
 }
