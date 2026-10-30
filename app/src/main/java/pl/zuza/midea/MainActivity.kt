@@ -183,11 +183,14 @@ class MainActivity : Activity() {
         }
     }
     private fun runDiagnostic(name:String) {
+        val cn=cloud.selectedItem.toString()
+        val un=account.text.toString().trim()
+        val pw=password.text.toString()
+        val did=id.text.toString().trim()
         job("Test diagnostyczny $name") {
             if(name!="CLOUD") bindWifi()
             val reply=getPython().getModule("midea_bridge").callAttr(
-                "diagnostic_probe",name, cloud.selectedItem.toString(),
-                account.text.toString().trim(),password.text.toString(),id.text.toString().trim()
+                "diagnostic_probe",name,cn,un,pw,did
             ).toString()
             onUI {
                 diagDisplays[name]?.text=reply + "\\nOczekiwanie na odpowiedz; wynik zostanie zaktualizowany automatycznie."
