@@ -3,11 +3,11 @@ android {
     namespace = "pl.zuza.midea"
     compileSdk = 35
     defaultConfig {
-        applicationId = "pl.zuza.midea.readonly"
+        applicationId = "pl.zuza.midearemote"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.7.1-x10"
+        versionCode = 100
+        versionName = "1.0.0"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
