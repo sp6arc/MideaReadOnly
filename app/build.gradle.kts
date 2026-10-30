@@ -3,7 +3,7 @@ android {
     namespace = "pl.zuza.midea"
     compileSdk = 35
     defaultConfig {
-        applicationId = "pl.zuza.midearemote.lua24"
+        applicationId = "pl.zuza.midearemote.lua241"
         minSdk = 26
         targetSdk = 35
         versionCode = 241
