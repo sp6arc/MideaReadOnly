@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: midearemonte-2-1-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
@@ -91,6 +95,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          head_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/midearemonte-python-upstream" --jq '.object.sha')"
+          if [ "$head_sha" != "$GITHUB_SHA" ]; then
+            echo "Newer commit exists; do not publish this obsolete APK."
+            exit 0
+          fi
           tag="v2.1.0-midearemonte"
           if ! gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" -R "$GITHUB_REPOSITORY" \
