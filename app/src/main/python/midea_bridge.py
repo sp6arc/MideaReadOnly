@@ -161,36 +161,49 @@ def start_monitor(host, port, id_text, model, protocol, cloud_name, username, pa
         raise ValueError("Autor nie otrzymał żadnych kluczy/tokenów")
     _event(f"Przygotowano {len(candidates)} zestawów kluczy; bez ujawniania ich wartości")
 
-    # Original CLI creates MideaAppliance with discovered identity and credentials.
-    # Each candidate uses the ORIGINAL device_selector. The original run() then
-    # executes connect(check_protocol=True), periodic status, heartbeat, reconnect.
-    # To avoid starting multiple potentially active threads, select the first
-    # candidate like the upstream CLI and do not implement Kotlin fallback.
-    first = next(iter(candidates.values()))
-    dev = device_selector(
-        name="MideaRemonte C3",
-        device_id=appliance_id,
-        device_type=0xC3,
-        ip_address=host,
-        port=int(port),
-        token=first["token"],
-        key=first["key"],
-        device_protocol=transport,
-        model=model,
-        subtype=0,
-        customize="",
-        cloud_name=cloud_name
-    )
-    if dev is None:
-        raise RuntimeError("Oryginalny device_selector nie obsługuje C3")
-    dev.register_update(_on_update)
-    with _lock:
-        if _session != session:
-            return "CANCELLED"
-        _device = dev
-    _event("Oryginalny MideaDevice.open(): wątek autora łączy i rozpoznaje protokół")
-    dev.open()
-    return "OK"
+    # Faithful copy of MideaCLI.discover():
+    # test candidate auth keys with dev.connect(), then refresh_status(True)
+    # before entering the original 30s refresh/heartbeat/reconnect thread.
+    # All protocol behavior remains inside the original MideaDevice.
+    from midealan.device import NoSupportedProtocol, AuthException
+    for index, candidate in enumerate(candidates.values(), start=1):
+        dev = device_selector(
+            name="MideaRemonte C3",
+            device_id=appliance_id,
+            device_type=0xC3,
+            ip_address=host,
+            port=int(port),
+            token=candidate["token"],
+            key=candidate["key"],
+            device_protocol=transport,
+            model=model,
+            subtype=0,
+            customize="",
+            cloud_name=cloud_name
+        )
+        if dev is None:
+            raise RuntimeError("Oryginalny device_selector nie obsługuje C3")
+        dev.register_update(_on_update)
+        _event(f"Próba autoryzacji LAN {index}/{len(candidates)} — oryginalny connect()")
+        if not dev.connect():
+            _event("Oryginalny connect(): brak uwierzytelnienia; kolejny klucz")
+            continue
+        try:
+            _event("Oryginalny refresh_status(True): sprawdzam obsługę zapytań")
+            dev.refresh_status(True)
+        except (AuthException, NoSupportedProtocol, OSError) as err:
+            _event(f"Sprawdzanie protokołu: {type(err).__name__}; następny klucz")
+            dev.close_socket()
+            continue
+        with _lock:
+            if _session != session:
+                dev.close_socket()
+                return "CANCELLED"
+            _device = dev
+        _event("Oryginalny MideaDevice.open(): heartbeat/refresh/reconnect autora")
+        dev.open()
+        return "OK"
+    raise RuntimeError("Nie udało się uwierzytelnić i odpytać oryginalnego klienta")
 
 
 def snapshot():
@@ -204,7 +217,10 @@ def snapshot():
                           ensure_ascii=False)
     # Values are not synthesized: read EXACT device.attributes from upstream.
     values = {str(k): _display(v) for k, v in dev.attributes.items()}
-    present = {k:v for k,v in values.items() if v is not None}
+    # Only fields confirmed by real process_message -> update_all callbacks.
+    # The upstream constructor initializes many bools to False, and those
+    # must NOT be presented as measured values before a response arrives.
+    present = {k: values[k] for k in times if k in values and values[k] is not None}
     status = {
         "running": bool(dev.is_alive()),
         "available": bool(dev.available),
