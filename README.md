@@ -21,11 +21,11 @@ Wykorzystywane metody autora:
 
 W wersji 2.1.0 dodano eksperymentalne osobne karty diagnostyczne:
 - X10: standard 03-10
-- 04-05: pasywny nasłuch 120 s
+- 04-05: pasywny nasłuch 360 s
 - ITS/BTRI: pojedyncze 03-02-01
 - Strony 2F10, 2F12: pojedyncze 03-00-2F10/2F12
 - X08, X0A, X0D: osobne zapytania odczytowe
-- Cloud Lua: sprawdzenie i pobranie profilu Lua (NIE jest live telemetry).
+- Cloud Lua: sprawdzenie i pobranie profilu Lua z konta, niezaleznie od LAN (NIE jest live telemetry).
 Testy tylko wysylają MessageType.query 0x03, bez zadnego 0x02 SET.
 Nie uzywaja nowych tokenow, modyfikacji konfiguracji, anonimowych
 skanow ID lub losowego brute force. Oryginalny pakiet Python pozostaje
