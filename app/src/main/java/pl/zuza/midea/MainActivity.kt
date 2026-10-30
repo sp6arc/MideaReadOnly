@@ -1,6 +1,9 @@
 package pl.zuza.midea
 
 import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -27,7 +30,7 @@ import java.time.OffsetDateTime
 import java.util.concurrent.Executors
 
 /**
- * MideaRemonte 2.4.0: passive raw telemetry, confirmed LAN C3 polls.
+ * MideaRemonte 2.4.1: foreground monitor, encrypted login, durable capture.
  * Original wuwentao/midea-lan transport, V3 authentication and decoder.
  * Only X01, X05 and X07 polls; passive X04 energy notifications.
  */
@@ -142,7 +145,7 @@ class MainActivity : Activity() {
         val scroll=ScrollView(this).apply{isFillViewport=true}
         scroll.addView(outer)
         setContentView(scroll)
-        val brand=label(outer,"MideaRemonte 2.4",24f,true)
+        val brand=label(outer,"MideaRemonte 2.4.1",24f,true)
         brand.setTextColor(accent)
         label(outer,"MONITORING POTWIERDZONYCH ODCZYTÓW • TYLKO ODCZYT",11f)
         version=label(outer,"Ładowanie biblioteki Midea…",12f)
@@ -192,8 +195,11 @@ class MainActivity : Activity() {
         account=field(outer,"Login chmury", "")
         password=field(outer,"Hasło chmury", "",
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
-        button(outer,"Uruchom monitoring (X01 / X05 / X07)"){startMonitor()}
+        restoreSavedSettings()
+        label(outer,"Dane połączenia zapisujemy zaszyfrowane w magazynie kluczy Androida. Po zgaszeniu ekranu monitor nadal działa jako usługa z powiadomieniem. Jeśli system całkowicie wymusi zatrzymanie aplikacji, zapisane próbki pozostaną na telefonie.",12f)
+        button(outer,"Uruchom monitoring w tle (X01 / X05 / X07)"){startMonitor()}
         button(outer,"Zatrzymaj monitoring"){stopMonitor()}
+        button(outer,"Usuń zapisane dane logowania"){clearSavedSettings()}
         label(outer,"Nie wysyłamy X09, X10, protokołu ITS ani zapytań eksperymentalnych. Nie zmieniamy ustawień pompy.",12f)
 
         heading(outer,"Raporty odebrane przez Wi-Fi")
@@ -211,6 +217,7 @@ class MainActivity : Activity() {
         values=label(outer,"Brak danych",12f)
         heading(outer,"Historia i eksport")
         button(outer,"ZAPISZ diagnostykę Lua + surowe ramki (JSON)"){export()}
+        label(outer,"Monitoring zapisuje dane lokalnie co 30 sekund. Eksport działa również po zamknięciu usługi, używając ostatniego automatycznego zapisu.",12f)
         label(outer,"Eksportuje do pliku JSON: dane, ostatnie 800 próbek i pełne bajty odebranych ramek 04-04/04-05 (maks. 30). Ramki 03-10 z numerami seryjnymi nie są eksportowane. Przed publicznym udostępnieniem sprawdź plik.",12f)
         heading(outer,"Zdarzenia")
         events=label(outer,"Brak zdarzeń",11f)
@@ -223,13 +230,20 @@ class MainActivity : Activity() {
                 state.text="Silnik załadowany; monitoring nieuruchomiony"
             }
         }
-        handler.postDelayed(tick,1800)
     }
 
-    private fun getPython():Python{
-        if(!Python.isStarted()) Python.start(AndroidPlatform(applicationContext))
-        return Python.getInstance()
+    override fun onResume(){
+        super.onResume()
+        handler.removeCallbacks(tick)
+        handler.postDelayed(tick,1000)
     }
+
+    override fun onStop(){
+        handler.removeCallbacks(tick)
+        super.onStop()
+    }
+
+    private fun getPython():Python=PythonEngine.get(this)
     private fun onUI(action:()->Unit){runOnUiThread{if(active)action()}}
     private fun job(name:String,action:()->Unit){
         state.text=name
@@ -277,6 +291,38 @@ class MainActivity : Activity() {
             }
         }
     }
+    private fun restoreSavedSettings(){
+        try {
+            val cfg=SecurePumpSettings.load(this)?:return
+            host.setText(cfg.host)
+            port.setText(cfg.port)
+            id.setText(cfg.deviceId)
+            model.setText(cfg.model)
+            proto.setText(cfg.protocol)
+            account.setText(cfg.username)
+            password.setText(cfg.password)
+            for(i in 0 until cloud.count){
+                if(cloud.getItemAtPosition(i).toString()==cfg.cloud){
+                    cloud.setSelection(i)
+                    break
+                }
+            }
+            state.text=if(SecurePumpSettings.enabled(this))
+                "Przywrócono dane • usługa monitoringu była aktywna"
+                else "Przywrócono zapisane dane połączenia"
+        }catch(_:Exception){
+            state.text="Zapisane dane logowania nie mogą zostać odszyfrowane; wpisz je ponownie"
+        }
+    }
+
+    private fun clearSavedSettings(){
+        stopMonitor()
+        SecurePumpSettings.clear(this)
+        account.setText("")
+        password.setText("")
+        state.text="Zapisane konto i konfiguracja usunięte z pamięci telefonu"
+    }
+
     private fun startMonitor(){
         val h=host.text.toString().trim()
         val p=port.text.toString().trim()
@@ -290,18 +336,29 @@ class MainActivity : Activity() {
             state.text="Wykryj pompę lub podaj IP, Device ID i model"
             return
         }
-        job("Łączenie przez Wi-Fi — tylko działające zapytania"){
-            bindWifi()
-            val result=getPython().getModule("midea_bridge").callAttr(
-                "start_monitor",h,p,devId,m,pr,cn,user,pass).toString()
-            onUI{state.text="Monitoring: $result"}
+        if(pr=="3" && (user.isBlank()||pass.isBlank())){
+            state.text="Podaj login i hasło SmartHome dla bezpiecznego połączenia V3"
+            return
+        }
+        try{
+            SecurePumpSettings.save(this,PumpSettings(h,p,devId,m,pr,cn,user,pass))
+            SecurePumpSettings.setEnabled(this,true)
+            if(Build.VERSION.SDK_INT>=33 &&
+               checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED){
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),241)
+            }
+            MonitorService.start(this)
+            state.text="Uruchomiono usługę monitoringu w tle • obserwuj powiadomienie Androida"
+        }catch(ex:Exception){
+            SecurePumpSettings.setEnabled(this,false)
+            state.text="Nie udało się uruchomić usługi ("+ex.javaClass.simpleName+")"
         }
     }
+
     private fun stopMonitor(){
-        job("Zatrzymywanie monitoringu"){
-            getPython().getModule("midea_bridge").callAttr("stop")
-            onUI{state.text="Monitoring zatrzymany"}
-        }
+        SecurePumpSettings.setEnabled(this,false)
+        MonitorService.stop(this)
+        state.text="Zlecono zatrzymanie monitoringu (historia na telefonie pozostaje)"
     }
     private fun cloudProfile(){
         val cn=cloud.selectedItem.toString()
@@ -565,13 +622,16 @@ class MainActivity : Activity() {
     }
     private fun export(){
         job("Przygotowanie raportu JSON i surowych ramek"){
-            val json=getPython().getModule("midea_bridge").callAttr("export_snapshot").toString()
+            val live=getPython().getModule("midea_bridge").callAttr("export_snapshot").toString()
+            val cfg=try{SecurePumpSettings.load(this)}catch(_:Exception){null}
+            val payload=if(JSONObject(live).optBoolean("running"))live
+                else cfg?.let{MonitorService.archived(this,it.deviceId)}?:live
             onUI {
-                pendingDiagnosticsJson=JSONObject(json).toString(2)
+                pendingDiagnosticsJson=JSONObject(payload).toString(2)
                 val intent=Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type="application/json"
-                    putExtra(Intent.EXTRA_TITLE,"MideaRemonte_2.4.0_Lua_diagnostic.json")
+                    putExtra(Intent.EXTRA_TITLE,"MideaRemonte_2.4.1_background_diagnostic.json")
                 }
                 try {
                     startActivityForResult(intent,requestSaveDiagnostics)
@@ -587,15 +647,11 @@ class MainActivity : Activity() {
         active=false
         pendingLuaPath?.let{File(it).delete()}
         handler.removeCallbacks(tick)
-        if(Python.isStarted()){
-            try{getPython().getModule("midea_bridge").callAttr("stop")}catch(_:Exception){}
-        }
         work.shutdownNow()
         statusWork.shutdownNow()
         wifiLock?.let{if(it.isHeld)it.release()}
-        val connectivity=getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-        @Suppress("DEPRECATION")
-        connectivity.bindProcessToNetwork(null)
+        // A foreground service owns the LAN session and network binding.
+        // NEVER stop the device or unbind process Wi-Fi when Activity dies.
         super.onDestroy()
     }
 }
