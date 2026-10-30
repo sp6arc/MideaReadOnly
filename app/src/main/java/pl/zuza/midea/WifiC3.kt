@@ -93,7 +93,7 @@ internal object WifiC3 {
         val model=runCatching { String(candidate,17,8,Charsets.US_ASCII).trim().filter{it.isLetterOrDigit()} }.getOrDefault("").take(8)
         // V3 outer discovery, or 5a5a with UDP v4 extension: prefer V3 on newer devices.
         val tail=41+u(candidate[40]); val udpVersion=if(candidate.size>=tail+8) uintLE(candidate,tail+4,4) else 0L
-        val v=if(udpVersion>=4) 4 else if(u(data[0])==0x83) 3 else 2
+        val v=if(udpVersion>=4) 3 else if(u(data[0])==0x83) 3 else 2
         return LanPump(ip,port,id,type,v,model)
     }
     /** Broadcast is limited to the phone's connected Wi-Fi, and to Midea C3 responses. */
@@ -229,9 +229,10 @@ internal object WifiC3 {
         frame[29]=(-frame.drop(1).sumOf { u(it) }).toByte()
         return frame
     }
-    private fun queryC3(subType:Int):ByteArray {
-        require(subType in listOf(1,5,7,9,10,16)){"Tylko dozwolone zapytania C3"}
+    private fun queryC3(subType:Int, messageProtocolVersion:Int=0):ByteArray {
+        require(subType in listOf(1,5,7,9,10,13,16)){"Tylko dozwolone zapytania C3"}
         val frame=Crypto.unhex("aa0bc3000000000000030000")
+        frame[8]=messageProtocolVersion.toByte()
         frame[10]=subType.toByte()
         frame[11]=(-frame.drop(1).sumOf{u(it)}).toByte()
         return frame
@@ -361,9 +362,9 @@ internal object WifiC3 {
             // X09 can time out: allow 5s before moving to the next read-only query.
             // Never have more than one query outstanding on this protocol.
             val schedule=mutableListOf(
-                0L to 0xA0, 1500L to 1, 3500L to 16,
-                8500L to 9, 14000L to 5, 16000L to 7,
-                18500L to 16, 24500L to 10
+                0L to 0xA0, 1700L to 1, 6200L to 9,
+                11100L to 5, 15700L to 7, 20200L to 16,
+                26000L to (if(profile in listOf("17100003","171000AU")) 13 else 16)
             )
             if(durationSeconds>30) {
                 for(t in 30 until durationSeconds step 30) schedule.add(t*1000L to 1)
@@ -372,6 +373,7 @@ internal object WifiC3 {
             }
             schedule.sortBy { it.first }
             var next=0;var lastProgress=0L;var lastHeartbeat=start
+            var messageProtocolVersion = 0
             val replies=mutableSetOf<Int>()
             while(android.os.SystemClock.elapsedRealtime()<end && !cancelled()) {
                 val now=android.os.SystemClock.elapsedRealtime()
@@ -385,7 +387,7 @@ internal object WifiC3 {
                 }
                 if(next<schedule.size && elapsed>=schedule[next].first) {
                     val sub=schedule[next++].second
-                    val cmd=if(sub==0xA0) queryAppliance() else queryC3(sub)
+                    val cmd=if(sub==0xA0) queryAppliance() else queryC3(sub,messageProtocolVersion)
                     val label=if(sub==0xA0) "A0" else "X%02X".format(sub)
                     val packet=packV2(pump.id,cmd)
                     output.write(auth?.encode(packet,6) ?: packet);output.flush()
@@ -405,9 +407,13 @@ internal object WifiC3 {
                     val mt=if(body.size>9)u(body[9]) else -1
                     val sub=if(body.size>10)u(body[10]) else -1
                     val at=java.time.Instant.now().toString()
+                    if(mt==0xA0 && valid && body.size>8) {
+                        messageProtocolVersion=u(body[8]);steps.add("A0: wersja protokołu wiadomości = " + messageProtocolVersion)
+                    }
+                    val x00cmd=if(sub==0 && mt==4) C3X00.command(body) else null
                     val label=when(mt) {
                         0xA0 -> "appliance/A0"
-                        4 -> "notify/X%02X".format(sub)
+                        4 -> if(x00cmd!=null) "notify/X00/"+x00cmd else "notify/X%02X".format(sub)
                         5 -> "notify2/X%02X".format(sub)
                         else -> "reply/X%02X".format(sub)
                     }
@@ -421,12 +427,19 @@ internal object WifiC3 {
                     if(mt==3 || mt==0xA0) replies.add(if(mt==0xA0) 0xA0 else sub)
                     try {
                         val values:Map<String,Number> = when {
+                            sub==0 && mt==4 -> C3X00.decode(body,profile)
                             sub==1 && mt in listOf(3,4,5) -> decodeBasicX01(body,profile)
                             sub==16 && mt in listOf(3,4,5) && body.size>=100 -> {
                                 raw=Crypto.hex(body.copyOfRange(0,minOf(body.size,88)))
                                 parseX10(body,profile)
                             }
                             mt==4 && sub in listOf(4,5) -> decodeNotification(body,profile)
+                            sub==13 && mt in listOf(3,4) && body.size>=49 -> mapOf(
+                                "temp_tw_out" to ((u(body[17]) shl 8) or u(body[18])) / 10.0,
+                                "tank_actual_temperature" to ((u(body[19]) shl 8) or u(body[20])) / 10.0,
+                                "instant_power0" to ((u(body[28]) shl 8) or u(body[29])),
+                                "total_energy_consumption_raw" to ((u(body[46]) shl 16) or (u(body[47]) shl 8) or u(body[48]))
+                            )
                             mt==3 && sub==5 && body.size>=13 ->
                                 mapOf("lan_silence_mode" to (u(body[11]) and 1))
                             mt==3 && sub==7 && body.size>=13 ->
