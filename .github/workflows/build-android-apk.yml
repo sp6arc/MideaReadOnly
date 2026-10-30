@@ -1,25 +1,17 @@
-name: MideaRemonte — budowanie APK
+name: MideaRemonte — oryginalny Python midea-lan
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main, master, midearemote-initial]
+    branches: [midearemonte-python-upstream]
     paths:
       - 'app/**'
       - 'gradle/**'
       - 'gradlew'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
+      - 'scripts/**'
       - '.github/workflows/build-android-apk.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'app/**'
-      - 'gradle/**'
-      - 'gradlew'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - '.github/workflows/build-android-apk.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,7 +19,7 @@ permissions:
 jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Java 17
@@ -35,27 +27,35 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Zainstaluj Android 35
+      - name: Python 3.12 for Chaquopy
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch exact upstream code without modifications
+        run: |
+          bash ./scripts/fetch-upstream.sh
+          python3.12 -m compileall -q app/src/main/python
+          sha256sum app/src/main/python/midealan/device.py
+      - name: Android 35
         run: |
           "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Zbuduj APK MideaRemonte 1.1.0
+      - name: Tests and APK
         run: |
           chmod +x ./gradlew
           ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
-      - name: Kontrola pliku APK
+      - name: APK integrity / signature
         run: |
           test -s app/build/outputs/apk/debug/app-debug.apk
           unzip -t app/build/outputs/apk/debug/app-debug.apk | tail -1
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk
+          "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk
           sha256sum app/build/outputs/apk/debug/app-debug.apk
-      - name: Udostępnij APK
+      - name: Upload complete APK
         uses: actions/upload-artifact@v4
         with:
-          name: MideaRemonte-1.1.0-debug-APK
+          name: MideaRemonte-2.0.0-ORIGINAL-PYTHON-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
           if-no-files-found: error
-
