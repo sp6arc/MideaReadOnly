@@ -6,8 +6,8 @@ android {
         applicationId = "pl.zuza.midea.readonly"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.5.1-dual-x01"
+        versionCode = 7
+        versionName = "0.6.0-wifi-listen"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
@@ -16,3 +16,4 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }
+

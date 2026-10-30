@@ -32,9 +32,11 @@ internal data class LanPump(val host: String, val port: Int, val id: Long, val t
 /** Only the inner C3 frame is exported. Limit to 88 bytes: X10 may contain serial
  * number blocks in its tail, which are deliberately NEVER exported. */
 internal data class LanFrame(val request: String, val messageType: Int, val subtype: Int,
-    val size: Int, val checksumOk: Boolean, val rawPrefixHex: String, val truncated: Boolean)
-internal data class LanResult(val readings: Map<String, Int>, val rawX10: String,
-    val responseType: String, val steps: List<String>, val frames: List<LanFrame>)
+    val size: Int, val checksumOk: Boolean, val rawPrefixHex: String, val truncated: Boolean,
+    val direction: String = "RX", val receivedAt: String = java.time.Instant.now().toString())
+internal data class LanResult(val readings: Map<String, Number>, val rawX10: String,
+    val responseType: String, val steps: List<String>, val frames: List<LanFrame>,
+    val fieldSources: Map<String,String> = emptyMap(), val fieldTimes: Map<String,String> = emptyMap())
 internal object WifiC3 {
     private val aesKey = Crypto.unhex("6a92ef406bad2f0359baad994171ea6d")
     private val signSalt = "xhdiwjnchekd4d512chdjx5d8e4c394D2D7S".toByteArray(Charsets.UTF_8)
@@ -154,25 +156,32 @@ internal object WifiC3 {
         require(MessageDigest.isEqual(md5(data.copyOfRange(0,data.size-16)+signSalt), data.copyOfRange(data.size-16,data.size))){"Nieprawidłowy podpis V2"}
         return aesEcb(data.copyOfRange(40,data.size-16),false)
     }
-    private fun readExactly(input:InputStream,n:Int):ByteArray {
-        require(n in 1..65536){"Błędny rozmiar ramki"}
-        val out=ByteArray(n); var p=0
-        while(p<n){ val count=input.read(out,p,n-p); if(count<0)throw java.io.EOFException("Przerwane połączenie TCP");p+=count }
-        return out
-    }
-    private fun readFrame(input:InputStream):ByteArray {
-        val h=readExactly(input,6)
-        if(u(h[0])==0x5a && u(h[1])==0x5a){
-            val n=u(h[4]) or (u(h[5]) shl 8)
-            require(n in 56..16384){"Niepoprawna długość V2 $n"}
-            return h+readExactly(input,n-6)
+    /** Retains partial frames across socket timeouts; consumes exactly one frame at a time. */
+    internal class FrameReader(private val input: InputStream) {
+        private var pending = ByteArray(0)
+        fun read(): ByteArray {
+            while (true) {
+                if (pending.size >= 6) {
+                    val n = when {
+                        u(pending[0]) == 0x5a && u(pending[1]) == 0x5a ->
+                            (u(pending[4]) or (u(pending[5]) shl 8)).also { require(it >= 56) }
+                        u(pending[0]) == 0x83 && u(pending[1]) == 0x70 ->
+                            ((u(pending[2]) shl 8) or u(pending[3])) + 8
+                        else -> error("Nieznany nagłówek transportu")
+                    }
+                    require(n in 8..16384) { "Nieprawidłowa długość transportu" }
+                    if (pending.size >= n) {
+                        val frame = pending.copyOfRange(0,n)
+                        pending = pending.copyOfRange(n,pending.size)
+                        return frame
+                    }
+                }
+                val chunk = ByteArray(4096)
+                val count = input.read(chunk)
+                if (count < 0) throw java.io.EOFException("Moduł zamknął połączenie TCP")
+                if (count > 0) pending += chunk.copyOf(count)
+            }
         }
-        if(u(h[0])==0x83 && u(h[1])==0x70){
-            val n=((u(h[2]) shl 8) or u(h[3]))+8
-            require(n in 8..16384){"Niepoprawna długość V3 $n"}
-            return h+readExactly(input,n-6)
-        }
-        throw IllegalStateException("Nieznana odpowiedź TCP ${Crypto.hex(h).take(12)}")
     }
     private class AuthV3(val token:ByteArray,val key:ByteArray){
         var tcpKey:ByteArray?=null
@@ -247,75 +256,150 @@ internal object WifiC3 {
     private fun frameValid(body: ByteArray): Boolean = body.size >= 12 &&
         u(body[0]) == 0xaa && u(body[2]) == 0xc3 && u(body[1]) == body.size - 1 &&
         (body.drop(1).sumOf { u(it) } and 255) == 0
-    /** TCP connection on Wi-Fi network only. V3 authenticates with the per-device cloud-issued key.
-     * X01 is polled FIRST as a known-successful baseline; X10 may be unsupported or delayed. */
-    fun poll(context:Context, pump:LanPump, profile:String, credentials:Pair<ByteArray,ByteArray>?):LanResult {
+    /** Verified standard 171H120F notifications. Values retain protocol units. */
+    fun decodeNotification(frame: ByteArray, profile: String): Map<String,Number> {
+        require(profile == "171H120F" && frameValid(frame) && u(frame[9]) == 4)
+        fun b(i:Int) = u(frame[11+i])
+        fun word(i:Int) = (b(i) shl 8) or b(i+1)
+        fun counter(i:Int) = (0..3).fold(0L) { value,j -> (value shl 8) or b(i+j).toLong() }
+        val values = linkedMapOf<String,Number>()
+        when(u(frame[10])) {
+            4 -> {
+                require(frame.size >= 26) { "Niepełna ramka X04" }
+                values["status_heating"] = b(0) and 1
+                values["status_cool"] = (b(0) shr 1) and 1
+                values["status_dhw"] = (b(0) shr 2) and 1
+                values["total_energy_consumption"] = counter(1)
+                values["total_produced_energy"] = counter(5)
+                if(b(9) != 127) values["outdoor_temperature"] = frame[20].toInt()
+                values["lan_zone1_temp_set"] = b(10)
+                values["lan_zone2_temp_set"] = b(11)
+                values["lan_dhw_temp_set"] = b(12)
+                values["lan_room_temp_set_raw"] = b(13)
+            }
+            5 -> {
+                require(frame.size >= 72) { "Niepełna ramka UnitPara notify X05" }
+                values["comp_run_freq"] = b(0)
+                values["compressor_on"] = if(b(0)>0) 1 else 0
+                values["fan_speed"] = b(1)*10
+                mapOf("temp_t3" to 2,"temp_t4" to 3,"temp_tp" to 4,
+                    "temp_tw_in" to 5,"temp_tw_out" to 6,"temp_t1" to 10,
+                    "temp_tw2" to 11,"temp_t2" to 12,"temp_t2b" to 13,
+                    "temp_t5" to 14,"temp_ta" to 15,"temp_th" to 20,"temp_tf" to 22
+                ).forEach { (name,offset) -> if(b(offset)!=127) values[name]=b(offset) }
+                values["odu_comp_current"] = b(7)
+                values["odu_voltage"] = word(8)
+                values["pressure_high"] = word(16)
+                values["pressure_low"] = word(18)
+                values["odu_target_fre"] = b(21)
+                values["water_flow_raw"] = word(25)
+                values["current_unit_capacity"] = word(27)
+                values["water_pressure"] = word(29)
+                values["total_electricity0"] = counter(32)
+                values["total_thermal0"] = counter(36)
+                values["instant_power0"] = word(48)
+                values["comp_total_run_time"] = word(56)
+                values["pump_i_pwm"] = b(58)
+                values["unit_mode_run"] = b(59)
+            }
+            else -> error("Nieobsługiwany typ powiadomienia")
+        }
+        return values
+    }
+
+    /** One Wi-Fi connection, bounded read-only session, receiving unsolicited notifications too. */
+    fun poll(context:Context, pump:LanPump, profile:String, credentials:Pair<ByteArray,ByteArray>?,
+        durationSeconds:Int = 30, cancelled:()->Boolean = {false},
+        progress:(LanResult,Int)->Unit = {_,_->}):LanResult {
         checkedIp(pump.host)
-        require(pump.type==0xc3){"To nie jest Midea C3"}
-        require(pump.protocol in 2..3){"Moduł zgłasza lokalny transport V${pump.protocol}. Obsługujemy TCP V2 i V3; TLS V4 wymaga dalszej implementacji."}
-        val net=network(context) ?: throw IllegalStateException("Brak połączenia telefonu z Wi-Fi")
-        val steps=mutableListOf("Wi‑Fi: połączono z siecią", "Cel: ${pump.host}:${pump.port} · V${pump.protocol}")
+        require(pump.type==0xc3 && pump.protocol in 2..3)
+        require(durationSeconds in 30..180)
+        val net=network(context) ?: error("Brak połączenia telefonu z Wi-Fi")
+        val steps=mutableListOf("Wi-Fi: połączono", "Transport V${pump.protocol}; protokół wiadomości 0",
+            "Sesja ${durationSeconds}s; zapytania X01/X10/X0A i ciągły odbiór powiadomień")
         val frames=mutableListOf<LanFrame>()
+        val decoded=linkedMapOf<String,Number>()
+        val sources=linkedMapOf<String,String>();val times=linkedMapOf<String,String>()
+        val families=linkedSetOf<String>()
+        var raw=""
+        fun snapshot()=LanResult(decoded.toMap(),raw,families.joinToString(" + ").ifEmpty{"brak"},
+            steps.toList(),frames.toList(),sources.toMap(),times.toMap())
         val socket=Socket()
         try {
             net.bindSocket(socket);socket.connect(InetSocketAddress(pump.host,pump.port),4000);socket.soTimeout=5000
             steps.add("TCP: połączono")
-            val output=socket.getOutputStream();val input=socket.getInputStream()
+            val output=socket.getOutputStream();val reader=FrameReader(socket.getInputStream())
             val auth=if(pump.protocol==3){
-                val pair=credentials ?: throw IllegalStateException("V3 wymaga tokenu z SmartHome — pobierz dostęp LAN")
-                val a=AuthV3(pair.first,pair.second)
-                output.write(a.encode(pair.first,0));output.flush()
-                a.authenticate(readFrame(input));steps.add("V3: uwierzytelniono");a
+                val pair=credentials ?: error("Brak kluczy LAN z konta SmartHome")
+                AuthV3(pair.first,pair.second).also {
+                    output.write(it.encode(pair.first,0));output.flush()
+                    it.authenticate(reader.read());steps.add("V3: uwierzytelniono")
+                }
             } else null
-            val decoded=linkedMapOf<String,Int>()
-            var raw=""; var resultType="brak"
-            // Warm up the C3 exchange through the successful X01 before trying unit parameters.
-            for (sub in listOf(0x01,0x10,0x0a)) {
-                val request="X${sub.toString(16).uppercase(java.util.Locale.US).padStart(2,'0')}"
-                val q=packV2(pump.id,queryC3(sub))
-                var matching=false
+            socket.soTimeout=1000
+            val start=android.os.SystemClock.elapsedRealtime()
+            val end=start+durationSeconds*1000L
+            // Initial baseline, one bounded X10 and HMI attempt; X01 keeps the session active.
+            val schedule=mutableListOf(0L to 1,3000L to 16,15000L to 10)
+            for(t in 30 until durationSeconds step 30) schedule.add(t*1000L to 1)
+            var next=0;var lastProgress=0L
+            val replies=mutableSetOf<Int>()
+            while(android.os.SystemClock.elapsedRealtime()<end && !cancelled()) {
+                val elapsed=android.os.SystemClock.elapsedRealtime()-start
+                if(next<schedule.size && elapsed>=schedule[next].first) {
+                    val sub=schedule[next++].second
+                    val cmd=queryC3(sub);val label="X%02X".format(sub)
+                    val packet=packV2(pump.id,cmd)
+                    output.write(auth?.encode(packet,6) ?: packet);output.flush()
+                    frames.add(LanFrame(label,3,sub,cmd.size,true,Crypto.hex(cmd),false,"TX"))
+                    steps.add("Wysłano $label (tylko odczyt)")
+                }
                 try {
-                    output.write(auth?.encode(q,6) ?: q);output.flush()
-                    val deadline=android.os.SystemClock.elapsedRealtime()+if(sub==0x10) 10500L else 6500L
-                    var received=0
-                    while (received<4 && android.os.SystemClock.elapsedRealtime()<deadline && !matching) {
-                        val remain=(deadline-android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1L)
-                        socket.soTimeout=remain.coerceAtMost(6500L).toInt()
-                        val wire=readFrame(input)
-                        val packet=auth?.decode(wire) ?: wire
-                        val body=unpackV2(packet,pump.id)
-                        val valid=frameValid(body)
-                        val messageType=if(body.size>9)u(body[9]) else -1
-                        val typ=if(body.size>10)u(body[10]) else -1
-                        frames.add(LanFrame(request,messageType,typ,body.size,valid,
-                            Crypto.hex(body.copyOfRange(0,minOf(body.size,88))),body.size>88))
-                        received++
-                        if(!valid){steps.add("$request: ramka C3, ale nieprawidłowa suma/długość");continue}
-                        steps.add("$request: otrzymano C3 0x${messageType.toString(16)}/0x${typ.toString(16)} (${body.size} bajtów)")
-                        if(typ==0x01 && messageType in listOf(3,4)) {
-                            try {
-                                val x01=decodeBasicX01(body,profile)
-                                decoded.putAll(x01)
-                                if(resultType=="brak") resultType="X01"
-                                steps.add("Dekoder X01: ${x01.size} pól podstawowych, bez danych sprężarki")
-                            } catch (e:Exception) {steps.add("X01: ${e.message?.take(80)}")}
+                    val wire=reader.read()
+                    val packet=auth?.decode(wire) ?: wire
+                    // V2 heartbeat/ack carries no C3 payload.
+                    if(packet.size>=6 && (u(packet[2]) or (u(packet[3]) shl 8)) in listOf(0x1001,0x0001)) continue
+                    val body=unpackV2(packet,pump.id)
+                    val valid=frameValid(body)
+                    val mt=if(body.size>9)u(body[9]) else -1
+                    val sub=if(body.size>10)u(body[10]) else -1
+                    val at=java.time.Instant.now().toString()
+                    val label=if(mt==4) "notify/X%02X".format(sub) else "reply/X%02X".format(sub)
+                    frames.add(LanFrame(label,mt,sub,body.size,valid,
+                        Crypto.hex(body.copyOfRange(0,minOf(body.size,88))),body.size>88,"RX",at))
+                    if(frames.size>600) frames.removeAt(0)
+                    if(!valid) { steps.add("Odrzucono błędną sumę/długość C3");continue }
+                    if(mt==3) replies.add(sub)
+                    try {
+                        val values:Map<String,Number> = when {
+                            sub==1 && mt in listOf(3,4) -> decodeBasicX01(body,profile)
+                            sub==16 && mt==3 -> {
+                                raw=Crypto.hex(body.copyOfRange(0,minOf(body.size,88)))
+                                parseX10(body,profile)
+                            }
+                            mt==4 && sub in listOf(4,5) -> decodeNotification(body,profile)
+                            else -> emptyMap()
                         }
-                        if(typ==0x10 && messageType==3) {
-                            raw=Crypto.hex(body.copyOfRange(0,minOf(body.size,88)))
-                            try {
-                                val x10=parseX10(body,profile)
-                                decoded.putAll(x10);resultType="X10"
-                                steps.add("Dekoder X10: ${x10.size} parametrów pracy")
-                            }catch(e:Exception){steps.add("X10: ${e.message?.take(80)}")}
+                        if(values.isNotEmpty()) {
+                            decoded.putAll(values);families.add(label)
+                            values.keys.forEach { sources[it]=label;times[it]=at }
                         }
-                        matching=(typ==sub && messageType==3)
-                        if(!matching) steps.add("$request: odpowiedź nie odpowiada zapytaniu — oczekuję dalej")
-                    }
-                    if(!matching) steps.add("$request: brak pasującej odpowiedzi")
-                }catch(e:SocketTimeoutException){steps.add("$request: brak odpowiedzi (timeout)")}
-                catch(e:Exception){steps.add("$request: ${e.message?.take(110) ?: e.javaClass.simpleName}")}
+                        steps.add("$label: ${body.size} B, rozpoznano ${values.size} pól")
+                    } catch(e:IllegalArgumentException) { steps.add("$label: niepełny lub niezgodny profil") }
+                    if(steps.size>300) steps.removeAt(0)
+                } catch(_:SocketTimeoutException) {
+                    // Keep partial transport bytes and keep listening until the session deadline.
+                }
+                if(android.os.SystemClock.elapsedRealtime()-lastProgress>=1000) {
+                    lastProgress=android.os.SystemClock.elapsedRealtime()
+                    progress(snapshot(),((end-lastProgress)/1000).coerceAtLeast(0).toInt())
+                }
             }
-            return LanResult(decoded,raw,resultType,steps,frames)
-        }finally{runCatching{socket.close()}}
+            for(sub in listOf(1,16,10)) if(sub !in replies) steps.add("X%02X: brak pasującej odpowiedzi w tej sesji".format(sub))
+            steps.add(if(cancelled()) "Sesja zatrzymana; zachowano odebrane dane" else "Sesja zakończona")
+        } catch(e:Exception) {
+            steps.add("Przerwano sesję: ${e.javaClass.simpleName}; zachowano odebrane dane")
+        } finally { runCatching{socket.close()} }
+        return snapshot()
     }
 }

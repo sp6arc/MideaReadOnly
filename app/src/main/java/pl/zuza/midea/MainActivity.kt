@@ -55,6 +55,10 @@ class MainActivity : Activity() {
     private var lanRawX10 = ""
     private var lanFrames = emptyList<LanFrame>()
     private var lanResultType = "brak"
+    private val lanCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var lanSources = emptyMap<String,String>()
+    private var lanTimes = emptyMap<String,String>()
+    private var lanStopButton: android.widget.Button? = null
     private var lanSteps = listOf<String>()
     private var lanStatus = "Nie testowano połączenia Wi-Fi"
     private var cloudChecks = mutableListOf<String>()
@@ -662,21 +666,31 @@ class MainActivity : Activity() {
         }
         card(root){ c ->
             title(c,"Diagnostyka lokalna")
-            caption(c,"Najpierw X01 (działające podstawowe odczyty), następnie X10 (sprężarka i wymienniki) i X0A (HMI). Same odczyty, bez sterowania.")
+            caption(c,"Odczyt X01/X10/X0A oraz powiadomienia X04/X05. Nasłuch trwa 3 minuty; zostaw aplikację otwartą. Brak pomiaru nie oznacza zera.")
             spacing(c,9)
-            action(c,"Odczytaj parametry bezpośrednio",primary=true){ readLan() }
+            action(c,"Odczyt Wi-Fi · 30 sekund",primary=true){ readLan(30) }
+            action(c,"Nasłuch diagnostyczny · 3 minuty",primary=true){ readLan(180) }
+            lanStopButton = android.widget.Button(this).apply {
+                text="Zatrzymaj nasłuch i zachowaj dane"
+                isEnabled=false
+                setOnClickListener { lanCancelled.set(true);isEnabled=false }
+                c.addView(this)
+            }
             if(lanSnapshot.fields.isNotEmpty()){
                 spacing(c,11)
                 label(c, "Źródło danych: $lanResultType · ${lanSnapshot.fields.size} pól", 13, ink, true)
-                if(lanResultType=="X01") caption(c,"X01 to dane stanu i nastaw, nie aktualna praca sprężarki. X10 nie odpowiedziało.")
-                lanSnapshot.fields.forEach{ f->fieldRow(c,f.recognizedLabel?:f.key,f.shownValue)}
+                if(!lanSnapshot.values.has("comp_run_freq")) caption(c,"Brak potwierdzonych danych sprężarki w tej sesji.")
+                lanSnapshot.fields.forEach{ f->
+                    fieldRow(c,f.recognizedLabel?:f.key,f.shownValue)
+                    caption(c,"${lanSources[f.key].orEmpty()} · ${lanTimes[f.key].orEmpty().take(19)} UTC")
+                }
             }
         }
         if(lanFrames.isNotEmpty())card(root){ c ->
-            title(c,"Surowe odpowiedzi C3")
+            title(c,"Wysłane i odebrane ramki C3")
             caption(c,"Zapisujemy maksymalnie 88 pierwszych bajtów każdej ramki. Usuwamy dalszą część, która może zawierać numer seryjny pompy.")
             lanFrames.forEach { f ->
-                label(c,"${f.request} → 0x${f.messageType.toString(16)}/0x${f.subtype.toString(16)} · ${f.size} B · suma ${if(f.checksumOk) "OK" else "NOK"}",12,ink,true,5)
+                label(c,"${f.direction} ${f.receivedAt.takeLast(13)} ${f.request} → 0x${f.messageType.toString(16)}/0x${f.subtype.toString(16)} · ${f.size} B · suma ${if(f.checksumOk) "OK" else "NOK"}",12,ink,true,5)
                 label(c,f.rawPrefixHex+(if(f.truncated)" [obcięto]" else ""),11,muted)
                 spacing(c,9)
             }
@@ -689,33 +703,48 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun readLan(){
+    private fun readLan(durationSeconds: Int = 30){
+        if(busy)return
         val p=selected ?:return
         val l=localPump ?: run{statusText.text="Najpierw wyszukaj moduł lub podaj jego IP";return}
         if(l.id!=p.id){statusText.text="Identyfikator urządzenia różni się od wybranej pompy";return}
         val now=SystemClock.elapsedRealtime()
         if(now-lastWifiRead in 0..29_999L){statusText.text="Ponów odczyt Wi-Fi po 30 sekundach.";return}
         lastWifiRead=now
+        lanCancelled.set(false)
+        lanStopButton?.isEnabled=true
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         runTask("Łączenie Wi-Fi z ${l.host}…",{
             // Never store or print LAN token/key. Obtained using currently authenticated cloud session.
             val keys= if(l.protocol==3) cloud.lanKeys(p.id) else null
-            WifiC3.poll(this,l,p.sn8,keys)
-        },{result->
-            lanSnapshot=Telemetry.capture(JSONObject(result.readings));lanRawX10=result.rawX10
-            lanFrames=result.frames;lanResultType=result.responseType
-            lanFetchedAt=Instant.now().toString()
-            lanSteps=result.steps
-            lanStatus=when(result.responseType) {
-                "X10" -> "Sukces: X10 — ${result.readings.size} parametrów (w tym praca urządzenia)"
-                "X01" -> "X01 działa: ${result.readings.size} pól podstawowych. X10 nadal bez pomiarów."
-                else -> "Połączono, lecz nie udało się zdekodować danych pompy"
+            WifiC3.poll(this,l,p.sn8,keys,durationSeconds,{lanCancelled.get()}) { result,remaining ->
+                runOnUiThread {
+                    if(!isFinishing && !isDestroyed) {
+                        acceptLan(result)
+                        statusText.text="Nasłuch: pozostało ${remaining}s · ${result.readings.size} pól · ${result.frames.count{it.direction=="RX"}} ramek RX"
+                    }
+                }
             }
+        },{result->
+            acceptLan(result)
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            lanStopButton?.isEnabled=false
+            lanStatus=if(result.readings.isEmpty()) "Sesja zakończona bez rozpoznanych danych — sprawdź dziennik"
+                else "Odebrano ${result.readings.size} pól · $lanResultType"
             feedback=lanStatus;dashboard()
         },{e ->
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            lanStopButton?.isEnabled=false
             lanStatus="Błąd Wi-Fi: ${e.message?.take(150)?:e.javaClass.simpleName}"
             lanSteps=lanSteps+listOf(lanStatus)
             feedback=lanStatus;dashboard()
         })
+    }
+    private fun acceptLan(result:LanResult) {
+        lanSnapshot=Telemetry.capture(JSONObject(result.readings));lanRawX10=result.rawX10
+        lanFrames=result.frames;lanResultType=result.responseType
+        lanSources=result.fieldSources;lanTimes=result.fieldTimes
+        lanFetchedAt=Instant.now().toString();lanSteps=result.steps
     }
     private fun findLan(){
         runTask("Wyszukiwanie fabrycznego Wi-Fi C3…",{WifiC3.discover(this)},{found ->
@@ -793,7 +822,7 @@ class MainActivity : Activity() {
             spacing(c, 6)
             caption(c, "Nie uruchamiamy Home Assistant ani Modbus. Lokalny odczyt korzysta wyłącznie z fabrycznego Wi-Fi. Bez zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.5.1 • Chmura + Wi-Fi · diagnostyka X01")
+            caption(c, "Wersja 0.6.0 • Chmura + Wi-Fi · nasłuch X01/X04/X05/X10")
         }
     }
 
@@ -892,11 +921,12 @@ class MainActivity : Activity() {
                 .put("responseType",lanResultType)
                 .put("rawFrames",JSONArray().apply {
                     lanFrames.forEach { f -> put(org.json.JSONObject()
-                        .put("request",f.request).put("messageType",f.messageType)
+                        .put("request",f.request).put("direction",f.direction).put("receivedAt",f.receivedAt).put("messageType",f.messageType)
                         .put("subtype",f.subtype).put("size",f.size)
                         .put("checksumValid",f.checksumOk)
                         .put("hexPrefix",f.rawPrefixHex).put("truncated",f.truncated)) }
                 })
+                .put("fieldSources",JSONObject(lanSources)).put("fieldReceivedAt",JSONObject(lanTimes))
                 .put("values",lanSnapshot.values).put("readAt",lanFetchedAt)
                 .put("result",lanStatus).put("steps",JSONArray(lanSteps)))
             .put("cloudTests", JSONArray(cloudChecks)).toString(2)
@@ -904,7 +934,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.5.1.json")
+            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.6.0.json")
         }, 10)
     }
     @Deprecated("Native activity result API")
@@ -935,8 +965,10 @@ class MainActivity : Activity() {
         else super.onBackPressed()
     }
     override fun onDestroy() {
+        lanCancelled.set(true)
         executor.submit { cloud.clear() }
         executor.shutdown()
         super.onDestroy()
     }
 }
+

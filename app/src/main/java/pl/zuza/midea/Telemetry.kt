@@ -26,6 +26,16 @@ internal data class TelemetrySnapshot(val values: JSONObject, val fields: List<T
 
 internal object Telemetry {
     val priorities = linkedMapOf(
+        "outdoor_temperature" to "Wi-Fi X04 · Temperatura zewnętrzna °C",
+        "status_heating" to "Wi-Fi X04 · Grzanie aktywne (0/1)",
+        "status_cool" to "Wi-Fi X04 · Chłodzenie aktywne (0/1)",
+        "status_dhw" to "Wi-Fi X04 · CWU aktywne (0/1)",
+        "total_energy_consumption" to "Wi-Fi X04 · Licznik energii pobranej (surowy)",
+        "total_produced_energy" to "Wi-Fi X04 · Licznik energii oddanej (surowy)",
+        "water_flow_raw" to "Przepływ wody (surowy)",
+        "comp_total_run_time" to "Łączny czas pracy sprężarki (h według protokołu)",
+        "pump_i_pwm" to "PWM pompy obiegowej (surowy)",
+        "lan_room_temp_set_raw" to "Wi-Fi X04 · Nastawa pokojowa (surowa)",
         // Klucze oryginalnego Lua T_0000_C3_171H120F (case insensitive).
         "comprunfreq" to "Sprężarka — aktualna częstotliwość (odczyt surowy)",
         "odutargetfre" to "Sprężarka — częstotliwość zadana (odczyt surowy)",
@@ -233,7 +243,7 @@ internal object Telemetry {
             ))
         }
         return obj(
-            "app" to "Midea ReadOnly 0.4.0",
+            "app" to "Midea ReadOnly 0.6.0",
             "source" to source,
             "fetchedAt" to fetchedAt,
             "measurementTimeKnown" to false,
@@ -252,3 +262,4 @@ internal object Telemetry {
         )
     }
 }
+
