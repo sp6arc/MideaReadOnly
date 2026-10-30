@@ -129,7 +129,7 @@ class MainActivity : Activity() {
             setPadding(px(16),px(16),px(16),px(28))
             setBackgroundColor(Color.rgb(245,248,253))
         }
-        val scroll=ScrollView(this).apply{fillViewport=true}
+        val scroll=ScrollView(this).apply{isFillViewport=true}
         scroll.addView(outer)
         setContentView(scroll)
         val brand=label(outer,"MideaRemonte 2.2",24f,true)
