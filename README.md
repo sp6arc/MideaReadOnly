@@ -1,4 +1,4 @@
-# MideaRemonte 2.0.0 – ORYGINALNY SILNIK PYTHON
+# MideaRemonte 2.0.1 – ORYGINALNY SILNIK PYTHON
 
 Dostarczamy oryginalny, NIEMODYFIKOWANY pakiet Python `midealan` z repozytorium
 https://github.com/wuwentao/midea-lan
@@ -15,7 +15,7 @@ Wykorzystywane metody autora:
 - `midealan.discover.discover` – UDP bez własnych ramek
 - `midealan.cloud.get_midea_cloud`, `login`, `get_cloud_keys`
 - `midealan.devices.device_selector`
-- `MideaDevice.open` -> `run` -> `connect(check_protocol=True)`
+- `MideaDevice.connect(check_protocol=True), potem MideaDevice.open` -> `run` -> `connect(check_protocol=True)`
 - `refresh_status(True)`, oryginalna kolejność zapytań, timeouts, heartbeat,
   ponowne połączenie, oryginalne dekodery C3/X10/X00.
 
