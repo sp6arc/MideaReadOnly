@@ -688,10 +688,10 @@ class MainActivity : Activity() {
         }
         card(root){ c ->
             title(c,"Diagnostyka lokalna")
-            caption(c,"Wersja 0.6.1: sekwencja A0 / X01 / X09 / X05 / X07 / X10 / X0A z działającej implementacji 171H120F. Odczyt X10 i pasywne X04/X05; bez zmiany ustawień.")
+            caption(c,"Wersja 0.7.0: odczyt według midea-lan, heartbeat co 9 s, automatyczne ponowne łączenie i nasłuch X04/X05. Dane sprężarki wyłącznie przy odebraniu diagnostyki X10/X05.")
             spacing(c,9)
             action(c,"Odczyt Wi-Fi · 30 sekund",primary=true){ readLan(30) }
-            action(c,"Nasłuch diagnostyczny · 3 minuty",primary=true){ readLan(180) }
+            action(c,"Odczyt serwisowy • 3 minuty (zalecane)",primary=true){ readLan(180) }
             lanStopButton = android.widget.Button(this).apply {
                 text="Zatrzymaj nasłuch i zachowaj dane"
                 isEnabled=false
@@ -844,7 +844,7 @@ class MainActivity : Activity() {
             spacing(c, 6)
             caption(c, "Nie uruchamiamy Home Assistant ani Modbus. Lokalny odczyt korzysta wyłącznie z fabrycznego Wi-Fi. Bez zmiany nastaw pompy.")
             spacing(c, 9)
-            caption(c, "Wersja 0.6.1 • X10 — pełna inicjalizacja C3 i rozszerzone pomiary")
+            caption(c, "Wersja 0.7.0 • C3 midea-lan: heartbeat, reconnect, X10 i powiadomienia")
         }
     }
 
@@ -956,7 +956,7 @@ class MainActivity : Activity() {
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.6.1.json")
+            putExtra(Intent.EXTRA_TITLE, "midea-diagnostic-v0.7.0.json")
         }, 10)
     }
     @Deprecated("Native activity result API")

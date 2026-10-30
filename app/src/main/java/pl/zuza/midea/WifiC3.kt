@@ -133,10 +133,10 @@ internal object WifiC3 {
         } finally { if(lock.isHeld)lock.release() }
         return candidates.values.toList()
     }
-    private fun packV2(id:Long, command:ByteArray): ByteArray {
+    private fun packV2(id:Long, command:ByteArray, msgType:Int=0x20): ByteArray {
         require(id in 1..0xffffffffffffL)
         val h=ByteArray(40)
-        h[0]=0x5a; h[1]=0x5a;h[2]=1;h[3]=0x11;h[6]=0x20
+        h[0]=0x5a; h[1]=0x5a;h[2]=1;h[3]=0x11;h[6]=msgType.toByte()
         for(i in 0..7)h[20+i]=(id ushr (8*i)).toByte()
         // Date/time bytes as specified in Midea PacketBuilder.
         val now=java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC)
@@ -230,6 +230,8 @@ internal object WifiC3 {
         frame[11]=(-frame.drop(1).sumOf{u(it)}).toByte()
         return frame
     }
+    /** Exact midea-lan heartbeat: V2 message type 0 and a single 0x00 payload. */
+    internal fun heartbeatPacket(id:Long):ByteArray = packV2(id,byteArrayOf(0),0)
     private fun parseX10(body:ByteArray, id:String):Map<String,Int> {
         require(body.size>63 && u(body[0])==0xaa && u(body[2])==0xc3 && u(body[10])==0x10){"Brak odpowiedzi X10"}
         require((u(body[9]) in listOf(3,4)) && body.drop(1).sumOf{u(it)} and 255==0){"Niepoprawna suma X10"}
@@ -316,8 +318,8 @@ internal object WifiC3 {
         return values
     }
 
-    /** One Wi-Fi connection, bounded read-only session, receiving unsolicited notifications too. */
-    fun poll(context:Context, pump:LanPump, profile:String, credentials:Pair<ByteArray,ByteArray>?,
+    /** Single authenticated LAN connection, with periodic C3 heartbeat. */
+    private fun pollOnce(context:Context, pump:LanPump, profile:String, credentials:Pair<ByteArray,ByteArray>?,
         durationSeconds:Int = 30, cancelled:()->Boolean = {false},
         progress:(LanResult,Int)->Unit = {_,_->}):LanResult {
         checkedIp(pump.host)
@@ -361,10 +363,18 @@ internal object WifiC3 {
                     if(t < durationSeconds*1000L-2000) schedule.add(t.toLong() to 16)
             }
             schedule.sortBy { it.first }
-            var next=0;var lastProgress=0L
+            var next=0;var lastProgress=0L;var lastHeartbeat=start
             val replies=mutableSetOf<Int>()
             while(android.os.SystemClock.elapsedRealtime()<end && !cancelled()) {
-                val elapsed=android.os.SystemClock.elapsedRealtime()-start
+                val now=android.os.SystemClock.elapsedRealtime()
+                val elapsed=now-start
+                if(now-lastHeartbeat>=9000) {
+                    val hb=heartbeatPacket(pump.id)
+                    output.write(auth?.encode(hb,6) ?: hb)
+                    output.flush()
+                    lastHeartbeat=now
+                    steps.add("Heartbeat: podtrzymano połączenie TCP")
+                }
                 if(next<schedule.size && elapsed>=schedule[next].first) {
                     val sub=schedule[next++].second
                     val cmd=if(sub==0xA0) queryAppliance() else queryC3(sub)
@@ -382,6 +392,7 @@ internal object WifiC3 {
                     // V2 heartbeat/ack carries no C3 payload.
                     if(packet.size>=6 && (u(packet[2]) or (u(packet[3]) shl 8)) in listOf(0x1001,0x0001)) continue
                     val body=unpackV2(packet,pump.id)
+                    if(body.size==1 && u(body[0])==0) continue // heartbeat ACK
                     val valid=frameValid(body)
                     val mt=if(body.size>9)u(body[9]) else -1
                     val sub=if(body.size>10)u(body[10]) else -1
@@ -402,12 +413,17 @@ internal object WifiC3 {
                     if(mt==3 || mt==0xA0) replies.add(if(mt==0xA0) 0xA0 else sub)
                     try {
                         val values:Map<String,Number> = when {
-                            sub==1 && mt in listOf(3,4) -> decodeBasicX01(body,profile)
-                            sub==16 && mt==3 -> {
+                            sub==1 && mt in listOf(3,4,5) -> decodeBasicX01(body,profile)
+                            sub==16 && mt in listOf(3,4,5) && body.size>=100 -> {
                                 raw=Crypto.hex(body.copyOfRange(0,minOf(body.size,88)))
                                 parseX10(body,profile)
                             }
                             mt==4 && sub in listOf(4,5) -> decodeNotification(body,profile)
+                            mt==3 && sub==5 && body.size>=13 ->
+                                mapOf("lan_silence_mode" to (u(body[11]) and 1))
+                            mt==3 && sub==7 && body.size>=13 ->
+                                mapOf("lan_eco_function" to (u(body[11]) and 1),
+                                    "lan_eco_timer" to ((u(body[11]) shr 1) and 1))
                             else -> emptyMap()
                         }
                         if(values.isNotEmpty()) {
@@ -433,4 +449,57 @@ internal object WifiC3 {
         } finally { runCatching{socket.close()} }
         return snapshot()
     }
+    /** Longer monitoring uses several authenticated connections if firmware
+     * closes idle TCP, preserving all real measurements across reconnects.
+     * The last short segment also observes the global deadline. */
+    fun poll(context:Context, pump:LanPump, profile:String, credentials:Pair<ByteArray,ByteArray>?,
+        durationSeconds:Int=30, cancelled:()->Boolean={false},
+        progress:(LanResult,Int)->Unit={_,_->}):LanResult {
+        require(durationSeconds in 30..180)
+        val clock=android.os.SystemClock.elapsedRealtime()
+        val deadline=clock+durationSeconds*1000L
+        val readings=linkedMapOf<String,Number>()
+        val steps=mutableListOf<String>()
+        val frames=mutableListOf<LanFrame>()
+        val fieldSources=linkedMapOf<String,String>()
+        val fieldTimes=linkedMapOf<String,String>()
+        val types=linkedSetOf<String>()
+        var raw=""
+        var tries=0
+        fun merge(next:LanResult) {
+            readings.putAll(next.readings)
+            if(next.rawX10.isNotBlank()) raw=next.rawX10
+            steps.addAll(next.steps)
+            frames.addAll(next.frames)
+            fieldSources.putAll(next.fieldSources)
+            fieldTimes.putAll(next.fieldTimes)
+            types.addAll(next.responseType.split(" + ").filter{it!="brak" && it.isNotBlank()})
+            while(frames.size>650)frames.removeAt(0)
+            while(steps.size>360)steps.removeAt(0)
+        }
+        fun result()=LanResult(readings.toMap(),raw,types.joinToString(" + ").ifBlank{"brak"},
+            steps.toList(),frames.toList(),fieldSources.toMap(),fieldTimes.toMap())
+        while(!cancelled() && android.os.SystemClock.elapsedRealtime()<deadline && tries<5) {
+            tries++
+            val remaining=((deadline-android.os.SystemClock.elapsedRealtime()+999)/1000).toInt().coerceIn(30,180)
+            val part=pollOnce(context,pump,profile,credentials,remaining,
+                {cancelled() || android.os.SystemClock.elapsedRealtime()>=deadline}) {partial, _ ->
+                    val currentReadings=LinkedHashMap(readings)
+                    currentReadings.putAll(partial.readings)
+                    val display=LanResult(currentReadings,
+                        if(partial.rawX10.isBlank())raw else partial.rawX10,
+                        part.responseType,steps+partial.steps,frames+partial.frames,
+                        fieldSources+partial.fieldSources,fieldTimes+partial.fieldTimes)
+                    progress(display,((deadline-android.os.SystemClock.elapsedRealtime())/1000).coerceAtLeast(0).toInt())
+                }
+            merge(part)
+            if(android.os.SystemClock.elapsedRealtime()<deadline && !cancelled() && tries<5) {
+                steps.add("Reconnect: kontynuacja nasłuchu po sesji TCP $tries")
+                try {Thread.sleep(800)}catch(_:InterruptedException){break}
+            }
+        }
+        steps.add("Próby połączenia TCP: $tries; odczyty X10 tylko gdy ramka rzeczywiście odebrana")
+        return result()
+    }
+
 }

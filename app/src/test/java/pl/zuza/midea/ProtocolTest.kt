@@ -225,4 +225,12 @@ class ProtocolTest {
         assertEquals(2100,v["pressure_low"])
         assertEquals(53,v["water_flow_raw"])
     }
+
+    @Test fun heartbeatPacketIsV2TypeZeroNotC3Set() {
+        val hb=WifiC3.heartbeatPacket(123456L)
+        assertEquals(0x5a,hb[0].toInt() and 255)
+        assertEquals(0x5a,hb[1].toInt() and 255)
+        assertEquals(0,hb[6].toInt() and 255)
+        assertTrue(hb.size>=56)
+    }
 }
