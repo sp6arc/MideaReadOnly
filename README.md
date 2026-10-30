@@ -50,3 +50,8 @@ wynikiem diagnostycznym, a nie dowodem na brak telemetrii w LetsLink.
 Implementacja Android zachowuje WYŁĄCZNIE funkcje odczytowe w UI.
 Pakiet autora zawiera również metody zapisu/sterowania, ale nie są one
 wywoływane. Upstream nie jest biblioteką serwisową LetsLink.
+
+## Instalacja testowa
+Ta kompilacja uzywa osobnego applicationId `pl.zuza.midearemote.diagnostics`:
+mozna ja zainstalowac obok MideaRemonte 2.0.1, bez odinstalowania poprzedniej.
+Nie uruchamiaj jednoczesnie aktywnego odczytu w obu aplikacjach.
