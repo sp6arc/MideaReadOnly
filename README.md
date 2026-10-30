@@ -47,9 +47,10 @@ potwierdzimy skali i poprawności. `status_heating` to ostatni raport
 
 ## Instalacja i budowa
 
-Testowe APK ma `applicationId=pl.zuza.midearemote.diagnostics`
-i aktualizuje MideaRemonte TESTY 2.1.0; może współistnieć
-z MideaRemonte 2.0.1. Nie uruchamiaj obu monitorów naraz.
+APK 2.2.0 ma osobny `applicationId=pl.zuza.midearemote.working`,
+aby uniknąć konfliktów podpisu debugowego. Może współistnieć ze starą
+MideaRemonte 2.0.1 i TESTY 2.1.0. Starszą TESTY można odinstalować;
+nie uruchamiaj więcej niż jednego monitora naraz.
 
 ```sh
 bash scripts/fetch-upstream.sh
